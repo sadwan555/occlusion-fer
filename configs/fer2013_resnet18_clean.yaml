@@ -1,0 +1,12 @@
+project:
+  name: occlusion-fer
+
+dataset:
+  name: fer2013
+  path: /path/to/fer2013.csv
+  image_size: 112
+  num_classes: 7
+
+training:
+  mode: clean
+  seed: 42
