@@ -1,0 +1,41 @@
+# macOS
+.DS_Store
+
+# Python cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Python environments
+.venv/
+venv/
+env/
+
+# Datasets
+data/
+datasets/
+
+# Training outputs
+outputs/
+runs/
+checkpoints/
+logs/
+
+# Model weights
+*.pt
+*.pth
+*.ckpt
+*.onnx
+
+# Archives
+*.zip
+*.tar
+*.tar.gz
+
+# Secrets and local configuration
+.env
+kaggle.json
+
+# IDE settings
+.vscode/
+.idea/
