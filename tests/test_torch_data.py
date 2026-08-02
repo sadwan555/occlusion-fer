@@ -141,6 +141,62 @@ def test_three_channels_have_identical_content() -> None:
     assert torch.equal(image[1], image[2])
 
 
+def test_imagenet_normalization_has_expected_shape_dtype_and_values() -> None:
+    source_image = np.full((48, 48), 255, dtype=np.uint8)
+    data = make_data([make_record(101, 0, "train", source_image)])
+    image, _, _ = Fer2013TorchDataset(
+        data,
+        split="train",
+        image_size=48,
+        normalize_imagenet=True,
+    )[0]
+    mean = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32)
+    std = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32)
+    expected = (torch.ones(3, dtype=torch.float32) - mean) / std
+
+    assert image.shape == (3, 48, 48)
+    assert image.dtype == torch.float32
+    torch.testing.assert_close(image[:, 0, 0], expected)
+    assert not torch.equal(image[0], image[1])
+    assert not torch.equal(image[1], image[2])
+
+
+def test_imagenet_normalization_does_not_modify_original_numpy_image() -> None:
+    data = make_data()
+    original_image = data.records[0].image.copy()
+    dataset = Fer2013TorchDataset(
+        data, split="train", normalize_imagenet=True
+    )
+
+    dataset[0]
+
+    np.testing.assert_array_equal(data.records[0].image, original_image)
+
+
+def test_explicitly_disabling_imagenet_normalization_preserves_old_behavior() -> None:
+    data = make_data()
+    default_image, _, _ = Fer2013TorchDataset(data, split="train")[0]
+    unnormalized_image, _, _ = Fer2013TorchDataset(
+        data, split="train", normalize_imagenet=False
+    )[0]
+
+    assert torch.equal(default_image, unnormalized_image)
+    assert unnormalized_image.min().item() >= 0.0
+    assert unnormalized_image.max().item() <= 1.0
+
+
+@pytest.mark.parametrize("normalize_imagenet", [0, 1, "true", None])
+def test_rejects_normalize_imagenet_that_is_not_bool(
+    normalize_imagenet: object,
+) -> None:
+    with pytest.raises(TorchDataError, match=r"normalize_imagenet.*bool"):
+        Fer2013TorchDataset(
+            make_data(),
+            split="train",
+            normalize_imagenet=normalize_imagenet,
+        )
+
+
 def test_sample_preserves_label_and_sample_id() -> None:
     _, label, record_sample_id = Fer2013TorchDataset(
         make_data(), split="validation"

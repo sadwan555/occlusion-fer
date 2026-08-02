@@ -14,6 +14,8 @@ from occlusion_fer.data import Fer2013Data, Fer2013Record, Fer2013Split
 
 
 VALID_SPLITS: tuple[Fer2013Split, ...] = ("train", "validation", "test")
+IMAGENET_MEAN = (0.485, 0.456, 0.406)
+IMAGENET_STD = (0.229, 0.224, 0.225)
 TorchSample = tuple[Tensor, int, int]
 
 
@@ -29,6 +31,7 @@ class Fer2013TorchDataset(Dataset[TorchSample]):
         data: Fer2013Data,
         split: str,
         image_size: int = 112,
+        normalize_imagenet: bool = False,
     ) -> None:
         if split not in VALID_SPLITS:
             allowed = ", ".join(VALID_SPLITS)
@@ -36,9 +39,12 @@ class Fer2013TorchDataset(Dataset[TorchSample]):
                 f"split must be one of {allowed}; got {split!r}"
             )
         _require_positive_integer(image_size, "image_size")
+        if type(normalize_imagenet) is not bool:
+            raise TorchDataError("normalize_imagenet must be a bool")
 
         self.split = cast(Fer2013Split, split)
         self.image_size = image_size
+        self.normalize_imagenet = normalize_imagenet
         self._records = tuple(
             record for record in data.records if record.split == self.split
         )
@@ -50,7 +56,9 @@ class Fer2013TorchDataset(Dataset[TorchSample]):
 
     def __getitem__(self, index: int) -> TorchSample:
         record = self._records[index]
-        image = _record_to_tensor(record, self.image_size)
+        image = _record_to_tensor(
+            record, self.image_size, self.normalize_imagenet
+        )
         return image, record.label, record.sample_id
 
 
@@ -77,7 +85,11 @@ def create_dataloader(
     )
 
 
-def _record_to_tensor(record: Fer2013Record, image_size: int) -> Tensor:
+def _record_to_tensor(
+    record: Fer2013Record,
+    image_size: int,
+    normalize_imagenet: bool,
+) -> Tensor:
     if record.image.shape != (48, 48):
         raise TorchDataError(
             f"sample {record.sample_id} image must have shape (48, 48); "
@@ -99,6 +111,10 @@ def _record_to_tensor(record: Fer2013Record, image_size: int) -> Tensor:
         mode="bilinear",
         align_corners=False,
     ).squeeze(0)
+    if normalize_imagenet:
+        mean = image.new_tensor(IMAGENET_MEAN).view(3, 1, 1)
+        std = image.new_tensor(IMAGENET_STD).view(3, 1, 1)
+        image = (image - mean) / std
 
     if not torch.isfinite(image).all().item():
         raise TorchDataError(
