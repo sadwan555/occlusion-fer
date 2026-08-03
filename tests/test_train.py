@@ -1,5 +1,7 @@
+import csv
+import json
 import random
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import numpy as np
@@ -173,6 +175,38 @@ def test_train_one_epoch_optimizer_step_changes_parameters() -> None:
     )
 
 
+def test_train_one_epoch_sets_gradients_to_none_before_backward() -> None:
+    class RecordingSgd(torch.optim.SGD):
+        def __init__(self, parameters: object) -> None:
+            super().__init__(parameters, lr=0.0)
+            self.recorded_set_to_none: bool | None = None
+
+        def zero_grad(self, set_to_none: bool = False) -> None:
+            self.recorded_set_to_none = set_to_none
+            super().zero_grad(set_to_none=set_to_none)
+
+    model = make_model()
+    optimizer = RecordingSgd(model.parameters())
+
+    train_one_epoch(model, make_loader(), optimizer, torch.device("cpu"))
+
+    assert optimizer.recorded_set_to_none is True
+
+
+def test_train_one_epoch_rejects_amp_on_cpu() -> None:
+    model = make_model()
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+
+    with pytest.raises(ValueError, match=r"AMP.*CUDA"):
+        train_one_epoch(
+            model,
+            make_loader(),
+            optimizer,
+            torch.device("cpu"),
+            amp_enabled=True,
+        )
+
+
 def test_train_one_epoch_rejects_empty_loader() -> None:
     model = make_model()
     optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
@@ -281,6 +315,16 @@ def test_evaluate_does_not_change_parameters_or_create_gradients() -> None:
     assert all(parameter.grad is None for parameter in model.parameters())
 
 
+def test_evaluate_rejects_amp_on_cpu() -> None:
+    with pytest.raises(ValueError, match=r"AMP.*CUDA"):
+        evaluate(
+            make_model(),
+            make_loader(),
+            torch.device("cpu"),
+            amp_enabled=True,
+        )
+
+
 def test_evaluate_rejects_empty_loader() -> None:
     with pytest.raises(ValueError, match=r"validation loader.*no samples"):
         evaluate(make_model(), [], torch.device("cpu"))
@@ -323,6 +367,34 @@ def test_save_checkpoint_creates_reloadable_best_file(tmp_path: Path) -> None:
     assert isinstance(loaded["resolved_config"], dict)
 
 
+def test_save_checkpoint_supports_last_file_and_grad_scaler_state(
+    tmp_path: Path,
+) -> None:
+    model = make_model()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.001)
+    scaler = torch.amp.GradScaler("cuda", enabled=False)
+
+    checkpoint_path = save_checkpoint(
+        output_directory=tmp_path,
+        model=model,
+        optimizer=optimizer,
+        epoch=2,
+        best_validation_accuracy=0.5,
+        seed=42,
+        device=torch.device("cpu"),
+        resolved_config=asdict(make_config()),
+        checkpoint_name="last.pt",
+        scaler=scaler,
+    )
+    loaded = torch.load(
+        checkpoint_path, map_location="cpu", weights_only=False
+    )
+
+    assert checkpoint_path == tmp_path.resolve() / "last.pt"
+    assert loaded["epoch"] == 2
+    assert loaded["grad_scaler_state_dict"] == scaler.state_dict()
+
+
 def test_limit_dataset_none_and_large_limit_use_all_samples() -> None:
     dataset = make_loader().dataset
 
@@ -353,14 +425,36 @@ def test_apply_config_overrides_changes_only_runtime_copy() -> None:
         data_path="/runtime/data.csv",
         output_directory="/runtime/output",
         epochs=3,
+        batch_size=64,
+        num_workers=4,
     )
 
     assert resolved.dataset.path == "/runtime/data.csv"
     assert resolved.output.directory == "/runtime/output"
     assert resolved.training.epochs == 3
+    assert resolved.training.batch_size == 64
+    assert resolved.training.num_workers == 4
     assert original.dataset.path == "/path/to/fer2013.csv"
     assert original.output.directory == "outputs/smoke"
     assert original.training.epochs == 1
+    assert original.training.batch_size == 32
+    assert original.training.num_workers == 0
+
+
+@pytest.mark.parametrize("batch_size", [0, -1, 1.5, True, "64"])
+def test_apply_config_overrides_rejects_invalid_batch_size(
+    batch_size: object,
+) -> None:
+    with pytest.raises(ValueError, match=r"batch_size.*positive integer"):
+        apply_config_overrides(make_config(), batch_size=batch_size)
+
+
+@pytest.mark.parametrize("num_workers", [-1, 1.5, True, "4"])
+def test_apply_config_overrides_rejects_invalid_num_workers(
+    num_workers: object,
+) -> None:
+    with pytest.raises(ValueError, match=r"num_workers.*non-negative integer"):
+        apply_config_overrides(make_config(), num_workers=num_workers)
 
 
 def test_load_config_with_overrides_does_not_modify_yaml(tmp_path: Path) -> None:
@@ -395,11 +489,15 @@ output:
         data_path="/runtime/data.csv",
         output_directory="/runtime/output",
         epochs=2,
+        batch_size=64,
+        num_workers=4,
     )
 
     assert resolved.dataset.path == "/runtime/data.csv"
     assert resolved.output.directory == "/runtime/output"
     assert resolved.training.epochs == 2
+    assert resolved.training.batch_size == 64
+    assert resolved.training.num_workers == 4
     assert config_path.read_text(encoding="utf-8") == config_text
 
 
@@ -414,6 +512,11 @@ def test_parse_args_supports_all_smoke_overrides() -> None:
             "/runtime/output",
             "--epochs",
             "2",
+            "--batch-size",
+            "64",
+            "--num-workers",
+            "4",
+            "--amp",
             "--max-train-samples",
             "8",
             "--max-validation-samples",
@@ -425,6 +528,9 @@ def test_parse_args_supports_all_smoke_overrides() -> None:
     assert args.data_path == "/runtime/data.csv"
     assert args.output_dir == "/runtime/output"
     assert args.epochs == 2
+    assert args.batch_size == 64
+    assert args.num_workers == 4
+    assert args.amp is True
     assert args.max_train_samples == 8
     assert args.max_validation_samples == 4
 
@@ -520,3 +626,67 @@ def test_artificial_fer_resnet_full_training_chain(tmp_path: Path) -> None:
     assert not torch.equal(before, model.fc.weight)
     assert checkpoint_path == tmp_path.resolve() / "best.pt"
     assert checkpoint_path.is_file()
+
+
+def test_run_training_saves_best_last_and_history(tmp_path: Path) -> None:
+    csv_path = tmp_path / "fer2013.csv"
+    pixels = " ".join(["128"] * (48 * 48))
+    rows = [
+        (0, pixels, "Training"),
+        (1, pixels, "Training"),
+        (2, pixels, "PublicTest"),
+        (3, pixels, "PublicTest"),
+        (4, pixels, "PrivateTest"),
+    ]
+    with csv_path.open("w", encoding="utf-8", newline="") as csv_file:
+        writer = csv.writer(csv_file)
+        writer.writerow(["emotion", "pixels", "Usage"])
+        writer.writerows(rows)
+
+    original = make_config()
+    output_directory = tmp_path / "output"
+    config = replace(
+        original,
+        dataset=replace(original.dataset, path=str(csv_path)),
+        model=replace(original.model, pretrained=False),
+        training=replace(
+            original.training,
+            batch_size=2,
+            num_workers=0,
+            device="cpu",
+        ),
+        output=replace(original.output, directory=str(output_directory)),
+    )
+
+    run_training(config)
+
+    best_path = output_directory / "best.pt"
+    last_path = output_directory / "last.pt"
+    history_path = output_directory / "history.json"
+    assert best_path.is_file()
+    assert last_path.is_file()
+    assert history_path.is_file()
+
+    history = json.loads(history_path.read_text(encoding="utf-8"))
+    assert len(history) == 1
+    epoch_record = history[0]
+    assert epoch_record["epoch"] == 1
+    assert epoch_record["train_samples"] == 2
+    assert epoch_record["validation_samples"] == 2
+    assert epoch_record["train_seconds"] >= 0.0
+    assert epoch_record["validation_seconds"] >= 0.0
+    assert epoch_record["epoch_seconds"] >= 0.0
+    assert epoch_record["train_samples_per_second"] > 0.0
+    assert epoch_record["cuda_peak_memory_bytes"] == 0
+    assert np.isfinite(epoch_record["train_loss"])
+    assert np.isfinite(epoch_record["validation_loss"])
+    assert 0.0 <= epoch_record["validation_accuracy"] <= 1.0
+
+    last_checkpoint = torch.load(
+        last_path, map_location="cpu", weights_only=False
+    )
+    runtime = last_checkpoint["resolved_config"]["runtime"]
+    assert runtime["amp_enabled"] is False
+    assert runtime["pin_memory"] is False
+    assert runtime["persistent_workers"] is False
+    assert runtime["prefetch_factor"] is None

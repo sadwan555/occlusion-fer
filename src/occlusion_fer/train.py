@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import json
+import math
 import random
+import time
+from contextlib import nullcontext
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -78,26 +82,39 @@ def train_one_epoch(
     loader: Iterable[Batch],
     optimizer: torch.optim.Optimizer,
     device: torch.device,
+    *,
+    amp_enabled: bool = False,
+    scaler: torch.amp.GradScaler | None = None,
 ) -> TrainingResult:
     """Run one training epoch and return sample-weighted loss."""
+    _validate_amp(amp_enabled, device)
+    if amp_enabled and scaler is None:
+        raise ValueError("AMP training requires a GradScaler")
     model.train()
     total_loss = 0.0
     sample_count = 0
+    non_blocking = device.type == "cuda"
 
     for images, labels, sample_ids in loader:
         batch_size = _validate_batch(images, labels, sample_ids)
-        images = images.to(device)
-        labels = labels.to(device)
+        images = images.to(device, non_blocking=non_blocking)
+        labels = labels.to(device, non_blocking=non_blocking)
 
-        optimizer.zero_grad()
-        logits = model(images)
-        _validate_logits(logits, batch_size)
-        loss = F.cross_entropy(logits, labels)
-        _validate_loss(loss)
-        loss.backward()
-        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+        with _autocast_context(amp_enabled):
+            logits = model(images)
+            _validate_logits(logits, batch_size)
+            loss = F.cross_entropy(logits, labels)
+        loss_value = _validated_loss_value(loss)
+        if scaler is None:
+            loss.backward()
+            optimizer.step()
+        else:
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
 
-        total_loss += loss.detach().item() * batch_size
+        total_loss += loss_value * batch_size
         sample_count += batch_size
 
     if sample_count == 0:
@@ -112,25 +129,30 @@ def evaluate(
     model: nn.Module,
     loader: Iterable[Batch],
     device: torch.device,
+    *,
+    amp_enabled: bool = False,
 ) -> EvaluationResult:
     """Evaluate without parameter updates and return loss and accuracy."""
+    _validate_amp(amp_enabled, device)
     model.eval()
     total_loss = 0.0
     correct_count = 0
     sample_count = 0
+    non_blocking = device.type == "cuda"
 
     with torch.inference_mode():
         for images, labels, sample_ids in loader:
             batch_size = _validate_batch(images, labels, sample_ids)
-            images = images.to(device)
-            labels = labels.to(device)
+            images = images.to(device, non_blocking=non_blocking)
+            labels = labels.to(device, non_blocking=non_blocking)
 
-            logits = model(images)
-            _validate_logits(logits, batch_size)
-            loss = F.cross_entropy(logits, labels)
-            _validate_loss(loss)
+            with _autocast_context(amp_enabled):
+                logits = model(images)
+                _validate_logits(logits, batch_size)
+                loss = F.cross_entropy(logits, labels)
+            loss_value = _validated_loss_value(loss)
 
-            total_loss += loss.item() * batch_size
+            total_loss += loss_value * batch_size
             correct_count += (logits.argmax(dim=1) == labels).sum().item()
             sample_count += batch_size
 
@@ -164,6 +186,8 @@ def apply_config_overrides(
     data_path: str | None = None,
     output_directory: str | None = None,
     epochs: int | None = None,
+    batch_size: int | None = None,
+    num_workers: int | None = None,
 ) -> AppConfig:
     """Return a configuration copy with one-run command-line overrides."""
     dataset = config.dataset
@@ -184,6 +208,16 @@ def apply_config_overrides(
         if type(epochs) is not int or epochs <= 0:
             raise ValueError("epochs override must be a positive integer")
         training = replace(training, epochs=epochs)
+    if batch_size is not None:
+        if type(batch_size) is not int or batch_size <= 0:
+            raise ValueError("batch_size override must be a positive integer")
+        training = replace(training, batch_size=batch_size)
+    if num_workers is not None:
+        if type(num_workers) is not int or num_workers < 0:
+            raise ValueError(
+                "num_workers override must be a non-negative integer"
+            )
+        training = replace(training, num_workers=num_workers)
 
     return replace(
         config,
@@ -199,6 +233,8 @@ def load_config_with_overrides(
     data_path: str | None = None,
     output_directory: str | None = None,
     epochs: int | None = None,
+    batch_size: int | None = None,
+    num_workers: int | None = None,
 ) -> AppConfig:
     """Load YAML and apply temporary runtime overrides without editing it."""
     config = load_config(config_path)
@@ -207,6 +243,8 @@ def load_config_with_overrides(
         data_path=data_path,
         output_directory=output_directory,
         epochs=epochs,
+        batch_size=batch_size,
+        num_workers=num_workers,
     )
 
 
@@ -220,8 +258,12 @@ def save_checkpoint(
     seed: int,
     device: torch.device,
     resolved_config: Mapping[str, object],
+    checkpoint_name: str = "best.pt",
+    scaler: torch.amp.GradScaler | None = None,
 ) -> Path:
-    """Save the current best training state as best.pt."""
+    """Save a reloadable best or last training checkpoint."""
+    if checkpoint_name not in {"best.pt", "last.pt"}:
+        raise ValueError("checkpoint_name must be 'best.pt' or 'last.pt'")
     output_path = Path(output_directory).expanduser()
     try:
         output_path.mkdir(parents=True, exist_ok=True)
@@ -230,7 +272,7 @@ def save_checkpoint(
             f"Could not create output directory: {output_path}"
         ) from exc
 
-    checkpoint_path = output_path / "best.pt"
+    checkpoint_path = output_path / checkpoint_name
     payload = {
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
@@ -240,6 +282,8 @@ def save_checkpoint(
         "device": str(device),
         "resolved_config": dict(resolved_config),
     }
+    if scaler is not None:
+        payload["grad_scaler_state_dict"] = scaler.state_dict()
     try:
         torch.save(payload, checkpoint_path)
     except Exception as exc:
@@ -261,6 +305,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--data-path")
     parser.add_argument("--output-dir")
     parser.add_argument("--epochs", type=int)
+    parser.add_argument("--batch-size", type=int)
+    parser.add_argument("--num-workers", type=int)
+    parser.add_argument("--amp", action="store_true")
     parser.add_argument("--max-train-samples", type=int)
     parser.add_argument("--max-validation-samples", type=int)
     return parser.parse_args(argv)
@@ -271,11 +318,14 @@ def run_training(
     *,
     max_train_samples: int | None = None,
     max_validation_samples: int | None = None,
+    amp_enabled: bool = False,
 ) -> None:
     """Execute the approved clean train/validation smoke workflow."""
     set_seed(config.training.seed)
     device = select_device(config.training.device)
+    _validate_amp(amp_enabled, device)
     _print_device_diagnostics(config.training.device, device)
+    print(f"amp_enabled={amp_enabled}")
 
     if config.dataset.path == "/path/to/fer2013.csv":
         raise FileNotFoundError(
@@ -316,6 +366,9 @@ def run_training(
         shuffle=True,
         seed=config.training.seed,
         num_workers=config.training.num_workers,
+        pin_memory=device.type == "cuda",
+        persistent_workers=config.training.num_workers > 0,
+        prefetch_factor=2,
     )
     validation_loader = create_dataloader(
         validation_dataset,
@@ -323,6 +376,9 @@ def run_training(
         shuffle=False,
         seed=config.training.seed,
         num_workers=config.training.num_workers,
+        pin_memory=device.type == "cuda",
+        persistent_workers=config.training.num_workers > 0,
+        prefetch_factor=2,
     )
     model = create_resnet18(
         num_classes=config.dataset.num_classes,
@@ -333,6 +389,9 @@ def run_training(
         lr=config.training.learning_rate,
         weight_decay=config.training.weight_decay,
     )
+    scaler = (
+        torch.amp.GradScaler("cuda", enabled=True) if amp_enabled else None
+    )
 
     resolved_config = asdict(config)
     resolved_config["smoke_limits"] = {
@@ -341,13 +400,46 @@ def run_training(
         "actual_train_samples": len(train_dataset),
         "actual_validation_samples": len(validation_dataset),
     }
+    resolved_config["runtime"] = {
+        "amp_enabled": amp_enabled,
+        "pin_memory": device.type == "cuda",
+        "persistent_workers": config.training.num_workers > 0,
+        "prefetch_factor": 2 if config.training.num_workers > 0 else None,
+    }
     best_validation_accuracy = -1.0
+    history: list[dict[str, int | float]] = []
 
     for epoch in range(1, config.training.epochs + 1):
+        _reset_peak_memory(device)
+        _synchronize_device(device)
+        epoch_started = time.perf_counter()
+        training_started = epoch_started
         training_result = train_one_epoch(
-            model, train_loader, optimizer, device
+            model,
+            train_loader,
+            optimizer,
+            device,
+            amp_enabled=amp_enabled,
+            scaler=scaler,
         )
-        validation_result = evaluate(model, validation_loader, device)
+        _synchronize_device(device)
+        training_seconds = time.perf_counter() - training_started
+
+        validation_started = time.perf_counter()
+        validation_result = evaluate(
+            model,
+            validation_loader,
+            device,
+            amp_enabled=amp_enabled,
+        )
+        _synchronize_device(device)
+        validation_seconds = time.perf_counter() - validation_started
+        epoch_seconds = time.perf_counter() - epoch_started
+        train_samples_per_second = (
+            training_result.sample_count / training_seconds
+        )
+        cuda_peak_memory_bytes = _peak_memory_bytes(device)
+
         saved_checkpoint: Path | None = None
         if validation_result.accuracy > best_validation_accuracy:
             best_validation_accuracy = validation_result.accuracy
@@ -360,7 +452,40 @@ def run_training(
                 seed=config.training.seed,
                 device=device,
                 resolved_config=resolved_config,
+                checkpoint_name="best.pt",
+                scaler=scaler,
             )
+
+        last_checkpoint = save_checkpoint(
+            output_directory=config.output.directory,
+            model=model,
+            optimizer=optimizer,
+            epoch=epoch,
+            best_validation_accuracy=best_validation_accuracy,
+            seed=config.training.seed,
+            device=device,
+            resolved_config=resolved_config,
+            checkpoint_name="last.pt",
+            scaler=scaler,
+        )
+        history.append(
+            {
+                "epoch": epoch,
+                "train_samples": training_result.sample_count,
+                "train_loss": training_result.average_loss,
+                "validation_samples": validation_result.sample_count,
+                "validation_loss": validation_result.average_loss,
+                "validation_accuracy": validation_result.accuracy,
+                "train_seconds": training_seconds,
+                "validation_seconds": validation_seconds,
+                "epoch_seconds": epoch_seconds,
+                "train_samples_per_second": train_samples_per_second,
+                "cuda_peak_memory_bytes": cuda_peak_memory_bytes,
+            }
+        )
+        history_path = _save_training_history(
+            config.output.directory, history
+        )
 
         print(f"Epoch {epoch}/{config.training.epochs}")
         print(f"train_samples={training_result.sample_count}")
@@ -368,10 +493,20 @@ def run_training(
         print(f"validation_samples={validation_result.sample_count}")
         print(f"validation_loss={validation_result.average_loss:.4f}")
         print(f"validation_accuracy={validation_result.accuracy:.4f}")
+        print(f"train_seconds={training_seconds:.6f}")
+        print(f"validation_seconds={validation_seconds:.6f}")
+        print(f"epoch_seconds={epoch_seconds:.6f}")
+        print(
+            "train_samples_per_second="
+            f"{train_samples_per_second:.2f}"
+        )
+        print(f"cuda_peak_memory_bytes={cuda_peak_memory_bytes}")
         if saved_checkpoint is None:
             print("saved_best_checkpoint=none")
         else:
             print(f"saved_best_checkpoint={saved_checkpoint}")
+        print(f"saved_last_checkpoint={last_checkpoint}")
+        print(f"saved_history={history_path}")
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -382,11 +517,14 @@ def main(argv: Sequence[str] | None = None) -> None:
         data_path=args.data_path,
         output_directory=args.output_dir,
         epochs=args.epochs,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
     )
     run_training(
         config,
         max_train_samples=args.max_train_samples,
         max_validation_samples=args.max_validation_samples,
+        amp_enabled=args.amp,
     )
 
 
@@ -418,11 +556,63 @@ def _validate_logits(logits: Tensor, batch_size: int) -> None:
         raise ValueError("logits must contain scores for exactly 7 classes")
 
 
-def _validate_loss(loss: Tensor) -> None:
+def _validated_loss_value(loss: Tensor) -> float:
     if loss.ndim != 0:
         raise ValueError("loss must be a scalar")
-    if not torch.isfinite(loss).item():
+    value = float(loss.detach().item())
+    if not math.isfinite(value):
         raise ValueError("loss must be finite")
+    return value
+
+
+def _validate_amp(amp_enabled: bool, device: torch.device) -> None:
+    if type(amp_enabled) is not bool:
+        raise ValueError("amp_enabled must be a bool")
+    if amp_enabled and device.type != "cuda":
+        raise ValueError("AMP can only be enabled for a CUDA device")
+
+
+def _autocast_context(amp_enabled: bool):
+    if amp_enabled:
+        return torch.autocast(
+            device_type="cuda", dtype=torch.float16, enabled=True
+        )
+    return nullcontext()
+
+
+def _synchronize_device(device: torch.device) -> None:
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+
+
+def _reset_peak_memory(device: torch.device) -> None:
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+
+
+def _peak_memory_bytes(device: torch.device) -> int:
+    if device.type != "cuda":
+        return 0
+    return int(torch.cuda.max_memory_allocated(device))
+
+
+def _save_training_history(
+    output_directory: str | Path,
+    history: Sequence[Mapping[str, int | float]],
+) -> Path:
+    output_path = Path(output_directory).expanduser()
+    try:
+        output_path.mkdir(parents=True, exist_ok=True)
+        history_path = output_path / "history.json"
+        history_path.write_text(
+            json.dumps(list(history), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        raise RuntimeError(
+            f"Could not save training history: {output_path / 'history.json'}"
+        ) from exc
+    return history_path.resolve()
 
 
 def _mps_is_available() -> bool:

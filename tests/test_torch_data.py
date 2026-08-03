@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 import torch
 
+import occlusion_fer.torch_data as torch_data_module
 from occlusion_fer.data import Fer2013Data, Fer2013Record, Fer2013Split
 from occlusion_fer.torch_data import (
     Fer2013TorchDataset,
@@ -134,6 +135,28 @@ def test_resize_uses_interpolation_instead_of_nearest_copying() -> None:
     assert torch.any(rescaled_pixels != rescaled_pixels.round())
 
 
+def test_resize_interpolates_one_channel_before_replication(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    interpolate_input_shapes: list[tuple[int, ...]] = []
+    original_interpolate = torch_data_module.F.interpolate
+
+    def recording_interpolate(
+        image: torch.Tensor, *args: object, **kwargs: object
+    ) -> torch.Tensor:
+        interpolate_input_shapes.append(tuple(image.shape))
+        return original_interpolate(image, *args, **kwargs)
+
+    monkeypatch.setattr(
+        torch_data_module.F, "interpolate", recording_interpolate
+    )
+
+    image, _, _ = Fer2013TorchDataset(make_data(), split="train")[0]
+
+    assert interpolate_input_shapes == [(1, 1, 48, 48)]
+    assert image.shape == (3, 112, 112)
+
+
 def test_three_channels_have_identical_content() -> None:
     image, _, _ = Fer2013TorchDataset(make_data(), split="train")[0]
 
@@ -250,6 +273,46 @@ def test_dataloader_labels_use_cross_entropy_dtype() -> None:
     assert batch_sample_ids.dtype == torch.long
 
 
+def test_dataloader_configures_transfer_and_worker_options() -> None:
+    dataset = Fer2013TorchDataset(make_data(), split="train")
+
+    loader = create_dataloader(
+        dataset,
+        batch_size=4,
+        shuffle=False,
+        seed=42,
+        num_workers=1,
+        pin_memory=True,
+        persistent_workers=True,
+        prefetch_factor=3,
+    )
+
+    assert loader.pin_memory is True
+    assert loader.persistent_workers is True
+    assert loader.prefetch_factor == 3
+
+
+def test_dataloader_disables_worker_only_options_with_zero_workers() -> None:
+    dataset = Fer2013TorchDataset(make_data(), split="train")
+
+    loader = create_dataloader(
+        dataset,
+        batch_size=4,
+        shuffle=False,
+        seed=42,
+        num_workers=0,
+        persistent_workers=True,
+        prefetch_factor=3,
+    )
+    images, labels, batch_sample_ids = next(iter(loader))
+
+    assert loader.persistent_workers is False
+    assert loader.prefetch_factor is None
+    assert images.shape == (4, 3, 112, 112)
+    assert labels.shape == (4,)
+    assert batch_sample_ids.shape == (4,)
+
+
 def test_same_seed_produces_same_shuffled_order() -> None:
     dataset = Fer2013TorchDataset(make_data(), split="train")
     first_loader = create_dataloader(
@@ -332,6 +395,50 @@ def test_rejects_negative_num_workers() -> None:
             shuffle=True,
             seed=42,
             num_workers=-1,
+        )
+
+
+@pytest.mark.parametrize("pin_memory", [0, 1, None, "true"])
+def test_rejects_pin_memory_that_is_not_bool(pin_memory: object) -> None:
+    dataset = Fer2013TorchDataset(make_data(), split="train")
+
+    with pytest.raises(TorchDataError, match=r"pin_memory.*bool"):
+        create_dataloader(
+            dataset,
+            batch_size=2,
+            shuffle=True,
+            seed=42,
+            pin_memory=pin_memory,
+        )
+
+
+@pytest.mark.parametrize("persistent_workers", [0, 1, None, "true"])
+def test_rejects_persistent_workers_that_is_not_bool(
+    persistent_workers: object,
+) -> None:
+    dataset = Fer2013TorchDataset(make_data(), split="train")
+
+    with pytest.raises(TorchDataError, match=r"persistent_workers.*bool"):
+        create_dataloader(
+            dataset,
+            batch_size=2,
+            shuffle=True,
+            seed=42,
+            persistent_workers=persistent_workers,
+        )
+
+
+@pytest.mark.parametrize("prefetch_factor", [0, -1, 1.5, True, None])
+def test_rejects_invalid_prefetch_factor(prefetch_factor: object) -> None:
+    dataset = Fer2013TorchDataset(make_data(), split="train")
+
+    with pytest.raises(TorchDataError, match=r"prefetch_factor.*positive integer"):
+        create_dataloader(
+            dataset,
+            batch_size=2,
+            shuffle=True,
+            seed=42,
+            prefetch_factor=prefetch_factor,
         )
 
 
