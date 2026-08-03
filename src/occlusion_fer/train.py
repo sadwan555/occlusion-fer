@@ -1,4 +1,4 @@
-"""Minimal ResNet-18 training entry point for FER2013 smoke tests."""
+"""Reproducible clean ResNet-18 training entry point for FER2013."""
 
 from __future__ import annotations
 
@@ -21,6 +21,16 @@ from torch.utils.data import Dataset, Subset
 
 from occlusion_fer.config import AppConfig, load_config
 from occlusion_fer.data import load_fer2013_csv
+from occlusion_fer.evaluation import EvaluationResult, evaluate
+from occlusion_fer.artifacts import (
+    collect_run_metadata,
+    utc_now,
+    write_evaluation_artifacts,
+    write_failure_artifact,
+    write_history_artifacts,
+    write_json_atomic,
+    write_resolved_config,
+)
 from occlusion_fer.models import create_resnet18
 from occlusion_fer.torch_data import Fer2013TorchDataset, create_dataloader
 
@@ -34,11 +44,25 @@ class TrainingResult:
     sample_count: int
 
 
-@dataclass(frozen=True)
-class EvaluationResult:
-    average_loss: float
-    accuracy: float
-    sample_count: int
+def is_better_validation_macro_f1(candidate: float, best: float) -> bool:
+    """Return whether a finite validation macro-F1 strictly improves best."""
+    if (
+        type(candidate) not in (int, float)
+        or not math.isfinite(candidate)
+        or not 0.0 <= candidate <= 1.0
+    ):
+        raise ValueError(
+            "candidate macro-F1 must be finite and between 0 and 1"
+        )
+    if (
+        type(best) not in (int, float)
+        or not math.isfinite(best)
+        or not (best == -1.0 or 0.0 <= best <= 1.0)
+    ):
+        raise ValueError(
+            "best macro-F1 must be finite and between -1 and 1"
+        )
+    return candidate > best
 
 
 def set_seed(seed: int) -> None:
@@ -125,47 +149,6 @@ def train_one_epoch(
     )
 
 
-def evaluate(
-    model: nn.Module,
-    loader: Iterable[Batch],
-    device: torch.device,
-    *,
-    amp_enabled: bool = False,
-) -> EvaluationResult:
-    """Evaluate without parameter updates and return loss and accuracy."""
-    _validate_amp(amp_enabled, device)
-    model.eval()
-    total_loss = 0.0
-    correct_count = 0
-    sample_count = 0
-    non_blocking = device.type == "cuda"
-
-    with torch.inference_mode():
-        for images, labels, sample_ids in loader:
-            batch_size = _validate_batch(images, labels, sample_ids)
-            images = images.to(device, non_blocking=non_blocking)
-            labels = labels.to(device, non_blocking=non_blocking)
-
-            with _autocast_context(amp_enabled):
-                logits = model(images)
-                _validate_logits(logits, batch_size)
-                loss = F.cross_entropy(logits, labels)
-            loss_value = _validated_loss_value(loss)
-
-            total_loss += loss_value * batch_size
-            correct_count += (logits.argmax(dim=1) == labels).sum().item()
-            sample_count += batch_size
-
-    if sample_count == 0:
-        raise ValueError("validation loader has no samples")
-    accuracy = correct_count / sample_count
-    return EvaluationResult(
-        average_loss=total_loss / sample_count,
-        accuracy=accuracy,
-        sample_count=sample_count,
-    )
-
-
 def limit_dataset(
     dataset: Dataset[Any], max_samples: int | None
 ) -> Dataset[Any]:
@@ -185,6 +168,8 @@ def apply_config_overrides(
     *,
     data_path: str | None = None,
     output_directory: str | None = None,
+    seed: int | None = None,
+    device: str | None = None,
     epochs: int | None = None,
     batch_size: int | None = None,
     num_workers: int | None = None,
@@ -204,6 +189,18 @@ def apply_config_overrides(
                 "output_directory override must be a non-empty string"
             )
         output = replace(output, directory=output_directory)
+    if seed is not None:
+        if type(seed) is not int or seed < 0:
+            raise ValueError("seed override must be a non-negative integer")
+        training = replace(training, seed=seed)
+    if device is not None:
+        allowed_devices = ("auto", "cpu", "mps", "cuda")
+        if type(device) is not str or device not in allowed_devices:
+            choices = ", ".join(allowed_devices)
+            raise ValueError(
+                f"device override must be one of {choices}"
+            )
+        training = replace(training, device=device)
     if epochs is not None:
         if type(epochs) is not int or epochs <= 0:
             raise ValueError("epochs override must be a positive integer")
@@ -232,6 +229,8 @@ def load_config_with_overrides(
     *,
     data_path: str | None = None,
     output_directory: str | None = None,
+    seed: int | None = None,
+    device: str | None = None,
     epochs: int | None = None,
     batch_size: int | None = None,
     num_workers: int | None = None,
@@ -242,6 +241,8 @@ def load_config_with_overrides(
         config,
         data_path=data_path,
         output_directory=output_directory,
+        seed=seed,
+        device=device,
         epochs=epochs,
         batch_size=batch_size,
         num_workers=num_workers,
@@ -254,7 +255,9 @@ def save_checkpoint(
     model: nn.Module,
     optimizer: torch.optim.Optimizer,
     epoch: int,
-    best_validation_accuracy: float,
+    best_validation_macro_f1: float,
+    validation_accuracy: float,
+    validation_macro_f1: float,
     seed: int,
     device: torch.device,
     resolved_config: Mapping[str, object],
@@ -277,7 +280,9 @@ def save_checkpoint(
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "epoch": epoch,
-        "best_validation_accuracy": best_validation_accuracy,
+        "best_validation_macro_f1": best_validation_macro_f1,
+        "validation_accuracy": validation_accuracy,
+        "validation_macro_f1": validation_macro_f1,
         "seed": seed,
         "device": str(device),
         "resolved_config": dict(resolved_config),
@@ -297,13 +302,18 @@ def save_checkpoint(
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    """Parse command-line arguments for a smoke training run."""
+    """Parse command-line arguments for a clean or bounded smoke run."""
     parser = argparse.ArgumentParser(
-        description="Run a minimal FER2013 ResNet-18 training smoke test."
+        description=(
+            "Run reproducible FER2013 clean ResNet-18 training or a bounded "
+            "smoke test."
+        )
     )
     parser.add_argument("--config", required=True)
     parser.add_argument("--data-path")
     parser.add_argument("--output-dir")
+    parser.add_argument("--seed", type=int)
+    parser.add_argument("--device")
     parser.add_argument("--epochs", type=int)
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--num-workers", type=int)
@@ -320,24 +330,45 @@ def run_training(
     max_validation_samples: int | None = None,
     amp_enabled: bool = False,
 ) -> None:
-    """Execute the approved clean train/validation smoke workflow."""
+    """Run clean training and preserve bounded failure information."""
+    _resolve_fer2013_data_path(config)
+    output_path = _reserve_output_directory(config.output.directory)
+    try:
+        _run_training(
+            config,
+            max_train_samples=max_train_samples,
+            max_validation_samples=max_validation_samples,
+            amp_enabled=amp_enabled,
+        )
+    except Exception as exc:
+        if output_path.is_dir():
+            try:
+                _record_run_failure(output_path, exc)
+            except Exception as artifact_exc:
+                print(f"failure_artifact_error={artifact_exc}")
+        raise
+
+
+def _run_training(
+    config: AppConfig,
+    *,
+    max_train_samples: int | None = None,
+    max_validation_samples: int | None = None,
+    amp_enabled: bool = False,
+) -> None:
+    """Execute the approved clean train/validation workflow."""
     set_seed(config.training.seed)
     device = select_device(config.training.device)
     _validate_amp(amp_enabled, device)
     _print_device_diagnostics(config.training.device, device)
     print(f"amp_enabled={amp_enabled}")
 
-    if config.dataset.path == "/path/to/fer2013.csv":
-        raise FileNotFoundError(
-            "FER2013 data path is still the placeholder; provide --data-path"
-        )
-    data_path = Path(config.dataset.path).expanduser()
-    if not data_path.is_file():
-        raise FileNotFoundError(
-            f"FER2013 data path does not exist or is not a file: {data_path}"
-        )
+    data_path = _resolve_fer2013_data_path(config)
 
-    data = load_fer2013_csv(data_path)
+    data = load_fer2013_csv(
+        data_path,
+        include_splits=("train", "validation"),
+    )
     train_dataset = Fer2013TorchDataset(
         data,
         split="train",
@@ -380,19 +411,6 @@ def run_training(
         persistent_workers=config.training.num_workers > 0,
         prefetch_factor=2,
     )
-    model = create_resnet18(
-        num_classes=config.dataset.num_classes,
-        pretrained=config.model.pretrained,
-    ).to(device)
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=config.training.learning_rate,
-        weight_decay=config.training.weight_decay,
-    )
-    scaler = (
-        torch.amp.GradScaler("cuda", enabled=True) if amp_enabled else None
-    )
-
     resolved_config = asdict(config)
     resolved_config["smoke_limits"] = {
         "max_train_samples": max_train_samples,
@@ -406,8 +424,46 @@ def run_training(
         "persistent_workers": config.training.num_workers > 0,
         "prefetch_factor": 2 if config.training.num_workers > 0 else None,
     }
-    best_validation_accuracy = -1.0
-    history: list[dict[str, int | float]] = []
+    output_path = Path(config.output.directory).expanduser()
+    resolved_config_path = write_resolved_config(output_path, resolved_config)
+    started_at_utc = utc_now()
+    run_metadata_path = output_path / "run_metadata.json"
+    running_metadata = collect_run_metadata(
+        status="running",
+        started_at_utc=started_at_utc,
+        finished_at_utc=None,
+        seed=config.training.seed,
+        training_mode=config.training.mode,
+        requested_device=config.training.device,
+        selected_device=str(device),
+        amp_enabled=amp_enabled,
+        repository_root=Path.cwd(),
+        output_directory=output_path,
+        artifact_paths={"resolved_config": resolved_config_path},
+        cuda_device_name=_cuda_device_name(device),
+    )
+    write_json_atomic(run_metadata_path, running_metadata)
+
+    model = create_resnet18(
+        num_classes=config.dataset.num_classes,
+        pretrained=config.model.pretrained,
+    ).to(device)
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=config.training.learning_rate,
+        weight_decay=config.training.weight_decay,
+    )
+    scaler = (
+        torch.amp.GradScaler("cuda", enabled=True) if amp_enabled else None
+    )
+
+    best_validation_macro_f1 = -1.0
+    history: list[dict[str, object]] = []
+    best_evaluation_artifacts: dict[str, Path] = {}
+    last_evaluation_artifacts: dict[str, Path] = {}
+    history_json_path: Path | None = None
+    history_csv_path: Path | None = None
+    last_checkpoint: Path | None = None
 
     for epoch in range(1, config.training.epochs + 1):
         _reset_peak_memory(device)
@@ -430,6 +486,8 @@ def run_training(
             model,
             validation_loader,
             device,
+            split="validation",
+            condition="clean",
             amp_enabled=amp_enabled,
         )
         _synchronize_device(device)
@@ -440,15 +498,31 @@ def run_training(
         )
         cuda_peak_memory_bytes = _peak_memory_bytes(device)
 
+        last_evaluation_artifacts = write_evaluation_artifacts(
+            output_path,
+            "validation/last",
+            validation_result,
+        )
+        updated_best_checkpoint = is_better_validation_macro_f1(
+            validation_result.macro_f1,
+            best_validation_macro_f1,
+        )
         saved_checkpoint: Path | None = None
-        if validation_result.accuracy > best_validation_accuracy:
-            best_validation_accuracy = validation_result.accuracy
+        if updated_best_checkpoint:
+            best_validation_macro_f1 = validation_result.macro_f1
+            best_evaluation_artifacts = write_evaluation_artifacts(
+                output_path,
+                "validation/best",
+                validation_result,
+            )
             saved_checkpoint = save_checkpoint(
                 output_directory=config.output.directory,
                 model=model,
                 optimizer=optimizer,
                 epoch=epoch,
-                best_validation_accuracy=best_validation_accuracy,
+                best_validation_macro_f1=best_validation_macro_f1,
+                validation_accuracy=validation_result.accuracy,
+                validation_macro_f1=validation_result.macro_f1,
                 seed=config.training.seed,
                 device=device,
                 resolved_config=resolved_config,
@@ -461,7 +535,9 @@ def run_training(
             model=model,
             optimizer=optimizer,
             epoch=epoch,
-            best_validation_accuracy=best_validation_accuracy,
+            best_validation_macro_f1=best_validation_macro_f1,
+            validation_accuracy=validation_result.accuracy,
+            validation_macro_f1=validation_result.macro_f1,
             seed=config.training.seed,
             device=device,
             resolved_config=resolved_config,
@@ -476,15 +552,17 @@ def run_training(
                 "validation_samples": validation_result.sample_count,
                 "validation_loss": validation_result.average_loss,
                 "validation_accuracy": validation_result.accuracy,
+                "validation_macro_f1": validation_result.macro_f1,
                 "train_seconds": training_seconds,
                 "validation_seconds": validation_seconds,
                 "epoch_seconds": epoch_seconds,
                 "train_samples_per_second": train_samples_per_second,
                 "cuda_peak_memory_bytes": cuda_peak_memory_bytes,
+                "updated_best_checkpoint": updated_best_checkpoint,
             }
         )
-        history_path = _save_training_history(
-            config.output.directory, history
+        history_json_path, history_csv_path = write_history_artifacts(
+            output_path, history
         )
 
         print(f"Epoch {epoch}/{config.training.epochs}")
@@ -493,6 +571,7 @@ def run_training(
         print(f"validation_samples={validation_result.sample_count}")
         print(f"validation_loss={validation_result.average_loss:.4f}")
         print(f"validation_accuracy={validation_result.accuracy:.4f}")
+        print(f"validation_macro_f1={validation_result.macro_f1:.4f}")
         print(f"train_seconds={training_seconds:.6f}")
         print(f"validation_seconds={validation_seconds:.6f}")
         print(f"epoch_seconds={epoch_seconds:.6f}")
@@ -506,7 +585,46 @@ def run_training(
         else:
             print(f"saved_best_checkpoint={saved_checkpoint}")
         print(f"saved_last_checkpoint={last_checkpoint}")
-        print(f"saved_history={history_path}")
+        print(f"saved_history={history_json_path}")
+
+    if history_json_path is None or history_csv_path is None:
+        raise RuntimeError("training completed without history artifacts")
+    if last_checkpoint is None or not best_evaluation_artifacts:
+        raise RuntimeError("training completed without required checkpoints")
+    artifact_paths: dict[str, Path] = {
+        "resolved_config": resolved_config_path,
+        "history_json": history_json_path,
+        "history_csv": history_csv_path,
+        "best_checkpoint": output_path / "best.pt",
+        "last_checkpoint": last_checkpoint,
+    }
+    artifact_paths.update(
+        {
+            f"validation_best_{name}": path
+            for name, path in best_evaluation_artifacts.items()
+        }
+    )
+    artifact_paths.update(
+        {
+            f"validation_last_{name}": path
+            for name, path in last_evaluation_artifacts.items()
+        }
+    )
+    completed_metadata = collect_run_metadata(
+        status="completed",
+        started_at_utc=started_at_utc,
+        finished_at_utc=utc_now(),
+        seed=config.training.seed,
+        training_mode=config.training.mode,
+        requested_device=config.training.device,
+        selected_device=str(device),
+        amp_enabled=amp_enabled,
+        repository_root=Path.cwd(),
+        output_directory=output_path,
+        artifact_paths=artifact_paths,
+        cuda_device_name=_cuda_device_name(device),
+    )
+    write_json_atomic(run_metadata_path, completed_metadata)
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -516,6 +634,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         args.config,
         data_path=args.data_path,
         output_directory=args.output_dir,
+        seed=args.seed,
+        device=args.device,
         epochs=args.epochs,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
@@ -596,23 +716,70 @@ def _peak_memory_bytes(device: torch.device) -> int:
     return int(torch.cuda.max_memory_allocated(device))
 
 
-def _save_training_history(
-    output_directory: str | Path,
-    history: Sequence[Mapping[str, int | float]],
-) -> Path:
+def _record_run_failure(
+    output_directory: Path, exception: BaseException
+) -> None:
+    timestamp = utc_now()
+    failure_path = write_failure_artifact(
+        output_directory,
+        stage="training",
+        exception=exception,
+        timestamp_utc=timestamp,
+    )
+    metadata_path = output_directory / "run_metadata.json"
+    if not metadata_path.is_file():
+        return
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"Could not update failed run metadata: {metadata_path}"
+        ) from exc
+    if not isinstance(metadata, dict):
+        raise RuntimeError(f"Run metadata must be a mapping: {metadata_path}")
+    metadata["status"] = "failed"
+    metadata["finished_at_utc"] = timestamp
+    artifacts = metadata.setdefault("artifacts", {})
+    if isinstance(artifacts, dict):
+        artifacts["failure"] = failure_path.relative_to(
+            output_directory.resolve()
+        ).as_posix()
+    write_json_atomic(metadata_path, metadata)
+
+
+def _resolve_fer2013_data_path(config: AppConfig) -> Path:
+    if config.dataset.path == "/path/to/fer2013.csv":
+        raise FileNotFoundError(
+            "FER2013 data path is still the placeholder; provide --data-path"
+        )
+    data_path = Path(config.dataset.path).expanduser()
+    if not data_path.is_file():
+        raise FileNotFoundError(
+            f"FER2013 data path does not exist or is not a file: {data_path}"
+        )
+    return data_path
+
+
+def _reserve_output_directory(output_directory: str | Path) -> Path:
     output_path = Path(output_directory).expanduser()
     try:
-        output_path.mkdir(parents=True, exist_ok=True)
-        history_path = output_path / "history.json"
-        history_path.write_text(
-            json.dumps(list(history), indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
+        output_path.mkdir(parents=True, exist_ok=False)
+    except FileExistsError as exc:
+        raise FileExistsError(
+            "Training requires a new output directory and will not overwrite "
+            f"existing evidence: {output_path}"
+        ) from exc
     except OSError as exc:
         raise RuntimeError(
-            f"Could not save training history: {output_path / 'history.json'}"
+            f"Could not create output directory: {output_path}"
         ) from exc
-    return history_path.resolve()
+    return output_path
+
+
+def _cuda_device_name(device: torch.device) -> str | None:
+    if device.type != "cuda":
+        return None
+    return torch.cuda.get_device_name(device)
 
 
 def _mps_is_available() -> bool:

@@ -1,148 +1,137 @@
-# Ubuntu 服务器预检与 GPU 冒烟训练操作说明
+# HIVE 部署、正式 clean baseline 与论文产物手册
 
-## 目的和边界
+## 1. 目的与研究边界
 
-本说明用于在老师的 Ubuntu 电脑上确认项目、FER2013 CSV、Python 环境、
-PyTorch GPU、输出目录和最小训练链路可以工作。这里的 GPU 运行只是冒烟
-检查，不是正式实验。完成干净数据基线之前，不开始遮挡、mixed training 或
-最终结果统计。
+本手册用于在 HIVE 的 Linux + NVIDIA GPU 环境中完成 FER2013 clean
+ResNet-18 的环境验证、三种子正式训练和一次锁定后的 PrivateTest 评估。
 
-所有操作只使用自己的账号和自己的 `${HOME}` 目录。不使用管理员权限，不改
-系统 Python，不改全局 CUDA 配置，不进入或修改其他用户的目录，也不把数据、
-模型权重或 checkpoint 放进 Git。任何一步报错都先停止并保存完整输出，不要
-在不清楚影响范围时继续尝试。
+项目只预测 FER2013 定义的七个表情标签。不能把结果解释为识别真实内在情绪、
+困惑、理解程度、参与度或学习效果，也不能据此宣称真实世界鲁棒性、跨数据集
+泛化、创新性或最先进性能。
 
-## 推荐目录
+正式 clean 协议在首次 PrivateTest 评估前锁定为：
 
-统一使用下面的个人目录：
+- ImageNet 预训练、标准 stem 的 ResNet-18；
+- 灰度图复制为三通道，bilinear resize 到 `112×112`，ImageNet normalization；
+- 官方 `Training` 训练、`PublicTest` 验证、`PrivateTest` 最终测试；
+- AdamW，learning rate `1e-4`，weight decay `1e-4`；
+- batch size `128`，epochs `30`，DataLoader workers `4`，CUDA AMP；
+- seeds `42`、`123`、`2026`；
+- 按 clean PublicTest macro-F1 选择 `best.pt`，相同分数保留更早 epoch；
+- 三个 seed 使用相同模型、处理、超参数和 checkpoint 规则。
+
+不要在查看 PrivateTest 结果后修改这些设置。任何后续 clean 与 mixed 对比也必须
+使用同一套正式训练预算和选择规则。
+
+## 2. 服务器目录与每次登录准备
+
+所有内容使用本人 `${HOME}`，项目、数据、环境和输出互相隔离：
 
 ```bash
 export FER_WORK_ROOT="${HOME}/anson-fer"
-export FER_PROJECT_PARENT="${FER_WORK_ROOT}/project"
-export FER_PROJECT_ROOT="${FER_PROJECT_PARENT}/occlusion-fer"
+export FER_PROJECT_ROOT="${FER_WORK_ROOT}/project/occlusion-fer"
 export FER_DATA_ROOT="${FER_WORK_ROOT}/data/raw"
 export FER_DATA_CSV="${FER_DATA_ROOT}/fer2013.csv"
 export FER_ENV_ROOT="${FER_WORK_ROOT}/envs/occlusion-fer"
 export FER_OUTPUT_ROOT="${FER_WORK_ROOT}/outputs"
 ```
 
-项目、数据、环境和输出互相分开：
+不要把这些真实路径写回 YAML。每次重新登录都重新设置变量并激活环境：
 
-- 项目：`${HOME}/anson-fer/project/occlusion-fer`
-- 原始数据：`${HOME}/anson-fer/data/raw/fer2013.csv`
-- 虚拟环境：`${HOME}/anson-fer/envs/occlusion-fer`
-- 输出：`${HOME}/anson-fer/outputs`
+```bash
+source "${FER_ENV_ROOT}/bin/activate"
+cd "${FER_PROJECT_ROOT}"
+```
 
-不要把这些服务器绝对路径写回仓库里的 YAML；运行时使用命令行覆盖。
-
-## 1. 只读检查服务器
-
-先依次运行：
+## 3. 只读检查服务器与 Git
 
 ```bash
 whoami
+hostname
 pwd
 uname -a
 nvidia-smi
 df -h
-git --version
+nproc
 python3 --version
-```
-
-检查含义：
-
-- `whoami`：确认正在使用自己的账号。
-- `pwd`：确认当前位置，不要误入其他用户目录。
-- `uname -a`：记录 Ubuntu 和内核信息。
-- `nvidia-smi`：确认 NVIDIA 驱动、GPU 名称、显存和当前占用；命令不存在或
-  报错时立即停止，请老师或管理员确认服务器状态。
-- `df -h`：确认个人目录所在磁盘有足够空间。
-- `git --version`、`python3 --version`：确认基础工具可用；本项目要求
-  Python 3.10 或更高版本。
-
-## 2. 创建个人目录
-
-```bash
-mkdir -p "${FER_PROJECT_PARENT}"
-mkdir -p "${FER_DATA_ROOT}"
-mkdir -p "${FER_WORK_ROOT}/envs"
-mkdir -p "${FER_OUTPUT_ROOT}"
-```
-
-## 3. 获取项目
-
-只有在服务器已经配置好该仓库的 SSH 访问时才运行：
-
-```bash
-cd "${FER_PROJECT_PARENT}"
-git clone git@github.com:sadwan555/occlusion-fer.git
-cd "${FER_PROJECT_ROOT}"
-git status
+git status --short --branch
 git log --oneline --decorate -n 3
 ```
 
-如果 SSH 访问没有配置好，不要把账号口令、令牌或私钥粘贴到终端、文档或
-仓库。先和老师确认允许的仓库访问方式，再继续。
-
-应确认当前分支为 `main`、工作区干净，并且本地提交和远端同步。
-
-## 4. 创建隔离 Python 环境
+正式运行必须满足：使用自己的账号、GPU 可见、磁盘足够、仓库在 `main`、工作区
+干净且本地与 `origin/main` 同步。发现陌生 GPU 进程时先确认归属，不结束其他
+用户的进程：
 
 ```bash
+nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv
+ps -o user,pid,ppid,etime,cmd -p PID
+```
+
+## 4. 首次获取项目和创建环境
+
+```bash
+mkdir -p "${FER_WORK_ROOT}/project" "${FER_DATA_ROOT}" \
+  "${FER_WORK_ROOT}/envs" "${FER_OUTPUT_ROOT}"
+git clone git@github.com:sadwan555/occlusion-fer.git "${FER_PROJECT_ROOT}"
 python3 -m venv "${FER_ENV_ROOT}"
 source "${FER_ENV_ROOT}/bin/activate"
-python --version
-python -m pip --version
 python -m pip install --upgrade pip
 ```
 
-后续每次重新登录服务器，都先重新设置本说明开头的目录变量，再激活这个
-虚拟环境。
-
-## 5. 安装匹配服务器的 PyTorch 和项目
-
-先再次查看 `nvidia-smi` 的驱动和 GPU 信息。不要猜测 CUDA wheel 地址或版本。
-在实际安装当天打开 PyTorch 官方
-[Start Locally](https://docs.pytorch.org/get-started/locally/) 页面，选择 Linux、
-Pip、Python 和该服务器适用的 CUDA 计算平台，然后只在当前虚拟环境中运行
-页面生成的命令。`torch` 与 `torchvision` 必须作为兼容的一对安装。
-
-安装 PyTorch 后先检查：
-
-```bash
-python -c "import torch, torchvision; print(torch.__version__); print(torchvision.__version__); print(torch.cuda.is_available())"
-```
-
-然后安装项目和现有测试依赖。当前项目的可选依赖名是 `test`：
+先根据 [PyTorch Start Locally](https://docs.pytorch.org/get-started/locally/)
+安装与 HIVE 驱动匹配的 Linux CUDA wheel，再安装项目。项目依赖范围锁定为
+`torch>=2.5,<2.6` 和 `torchvision>=0.20,<0.21`，与已验证的
+`2.5.1+cu121 / 0.20.1+cu121` 组合相容，不会要求升级到 0.28。
 
 ```bash
 cd "${FER_PROJECT_ROOT}"
 python -m pip install -e ".[test]"
 python -m pip check
+python -c "import torch, torchvision; print('torch=', torch.__version__); print('torchvision=', torchvision.__version__); print('cuda=', torch.cuda.is_available()); print('gpu=', torch.cuda.get_device_name(0))"
 ```
 
-如果版本解析失败、`pip check` 报冲突，或 `torch.cuda.is_available()` 不是
-`True`，立即停止并保存输出。
+`pip check` 必须无错误，`cuda=True`，GPU 名称应为当前获准使用的设备。
 
-## 6. 放置 FER2013 CSV
+## 5. Kaggle API 与服务器直接下载 FER2013
 
-由老师或数据负责人按许可方式把原始 FER2013 CSV 放到：
-
-```text
-${HOME}/anson-fer/data/raw/fer2013.csv
-```
-
-数据必须位于仓库外。不要通过本项目编写下载器，不要把 CSV 或解压后的图片
-复制到项目目录。放好后只检查文件存在和大小：
+在 Kaggle 网页的账号设置中创建 API token。下载到 Mac 的只是很小的
+`kaggle.json` 凭据文件，不是数据集。先在 HIVE 创建受限目录：
 
 ```bash
+# HIVE 执行
+mkdir -p "${HOME}/.kaggle"
+chmod 700 "${HOME}/.kaggle"
+```
+
+然后从 **Mac → Server** 传输凭据：
+
+```bash
+# Mac Terminal 执行；设置为实际的 SSH 账号和主机
+export HIVE_SSH_TARGET="your_username@your_hive_hostname"
+scp "${HOME}/Downloads/kaggle.json" \
+  "${HIVE_SSH_TARGET}:~/.kaggle/kaggle.json"
+```
+
+服务器端先创建目标目录，再设置最小权限。不要打印、截图、提交或发送
+`kaggle.json` 内容：
+
+```bash
+# HIVE 执行
+chmod 600 "${HOME}/.kaggle/kaggle.json"
+python -m pip install kaggle
+kaggle datasets files -d deadskull7/fer2013
+kaggle datasets download -d deadskull7/fer2013 \
+  -p "${FER_DATA_ROOT}" --unzip
 ls -lh "${FER_DATA_CSV}"
 ```
 
-## 7. 运行服务器 preflight
+数据集始终直接进入 HIVE 的仓库外目录，不在 Mac 下载大文件，也不进入 Git。
+CSV 必须包含 `emotion,pixels,Usage`，并保留三个官方 split 名称。
 
-先运行有限样本预检。它会统计完整 CSV，但只用有限样本建立 DataLoader 和做
-一次前向；它不会训练、下载预训练权重或保存 checkpoint。
+## 6. Preflight
+
+preflight 检查环境、完整 CSV、split、batch、随机初始化模型 forward 和输出目录；
+不会训练、下载预训练权重或保存 checkpoint。
 
 ```bash
 cd "${FER_PROJECT_ROOT}"
@@ -152,92 +141,180 @@ python -m occlusion_fer.preflight \
   --data-path "${FER_DATA_CSV}" \
   --output-dir "${FER_OUTPUT_ROOT}/preflight" \
   --device cuda \
-  --batch-size 8 \
-  --max-train-samples 32 \
-  --max-validation-samples 16 \
+  --batch-size 32 \
   2>&1 | tee "${FER_OUTPUT_ROOT}/preflight.log"
 ```
 
-只有末尾出现 `PREFLIGHT PASSED` 才能继续。还应看到：
+只有末尾出现 `PREFLIGHT PASSED` 才继续。应同时确认 Training、PublicTest、
+PrivateTest 数量合理，batch 为 `[N,3,112,112]`，logits 为 `[N,7]`。
 
-- `selected_device=cuda`；
-- 正确的 CUDA 可用状态和 GPU 名称；
-- 完整 CSV 的总数、Training、PublicTest、PrivateTest 数量；
-- 每个 split 的七类计数，缺类只会作为独立 warning 显示；
-- train/validation 批次形状为 `[N, 3, 112, 112]`；
-- float32 图像、int64 标签、有限数值和样本 ID；
-- `(N, 7)` 的有限 logits；
-- `model_forward=PASS` 和 `output_directory=PASS`。
+## 7. 性能 smoke test
 
-## 8. 运行一次 1 epoch GPU 冒烟训练
-
-预检全部通过后，才运行一次小样本、单 epoch 训练。配置中的 `device: auto`
-应在该服务器选择 CUDA：
+HIVE 已验证 `num_workers=0` 会让 CSV 图像预处理串行阻塞 GPU；`num_workers=4`
+允许四个独立 worker 预取 batch，且与该账号可用的 6 个 CPU core 相符。先用
+固定子集重现性能链路：
 
 ```bash
 export FER_SMOKE_OUTPUT="${FER_OUTPUT_ROOT}/clean-smoke"
-cd "${FER_PROJECT_ROOT}"
 set -o pipefail
 python -m occlusion_fer.train \
   --config configs/fer2013_resnet18_clean.yaml \
   --data-path "${FER_DATA_CSV}" \
   --output-dir "${FER_SMOKE_OUTPUT}" \
+  --seed 42 \
+  --device cuda \
   --epochs 1 \
-  --max-train-samples 512 \
-  --max-validation-samples 128 \
+  --batch-size 128 \
+  --num-workers 4 \
+  --amp \
+  --max-train-samples 8192 \
+  --max-validation-samples 1024 \
   2>&1 | tee "${FER_OUTPUT_ROOT}/clean-smoke.log"
 ```
 
-这仍然是 `SMOKE TEST — NOT A FORMAL EXPERIMENT`。检查：
+这必须显示 `SMOKE TEST — NOT A FORMAL EXPERIMENT`。确认 loss 有限、吞吐合理、
+产生 best/last checkpoint 和 validation artifacts。smoke 数值不能写入正式结果。
 
-- `selected_device=cuda`，并记录 GPU 名称；
-- 实际训练样本为 512 或训练 split 的实际较小值；
-- 实际验证样本为 128 或验证 split 的实际较小值；
-- train/validation loss 都是有限数；
-- validation accuracy 在 0 到 1 之间；
-- 日志没有显存不足、CSV 解析或设备错误；
-- 生成了 `best.pt`。
+## 8. 三种子正式 clean 训练
 
-只查看 checkpoint，不移动、不删除：
+开始前再次确认 Git 干净，并记录环境。不要使用 `max-*-samples`：
 
 ```bash
-ls -lh "${FER_SMOKE_OUTPUT}/best.pt"
-```
-
-## 9. 必须停止的情况
-
-出现下列任一情况就停止，不要继续训练：
-
-- `nvidia-smi` 不可用，或预检没有选择 CUDA；
-- Python、torch、torchvision 版本不兼容；
-- `pip check` 报依赖冲突；
-- FER2013 路径错误、CSV 为空、split 为空、像素或标签解析失败；
-- 批次形状、dtype、有限性或 logits 检查失败；
-- 输出目录不能创建、写入、读取或清理临时标记；
-- GPU 显存不足，loss 为 NaN/Inf，accuracy 超出 0 到 1；
-- 仓库不干净、提交不匹配，或出现未知文件；
-- 任何密钥、真实数据、权重或输出进入 Git 工作区。
-
-## 10. 本阶段禁止做的事
-
-本次服务器检查不运行正式三种子实验，不运行 PrivateTest 最终评估，不生成
-正式表格，不实现或运行遮挡、mixed training、macro-F1、confusion matrix，
-不改模型、依赖或仓库配置，也不清理系统文件、其他用户文件或服务器软件。
-
-## 11. 成功后的保存与下一步
-
-保留这三类材料即可：
-
-- `${FER_OUTPUT_ROOT}/preflight.log` 和
-  `${FER_OUTPUT_ROOT}/clean-smoke.log`；
-- 当前虚拟环境的版本记录；
-- `${FER_SMOKE_OUTPUT}/best.pt` 冒烟 checkpoint。
-
-保存环境版本：
-
-```bash
+git status --short --branch
+git rev-parse HEAD
 python -m pip freeze > "${FER_OUTPUT_ROOT}/environment.txt"
+nvidia-smi > "${FER_OUTPUT_ROOT}/nvidia-smi-before.txt"
 ```
 
-完成后停止。下一步只规划正式的 clean baseline；在审核服务器预检和 GPU 冒烟
-结果之前，不启动长时间正式训练。
+依次运行三个 seed，每个 run 使用新的独立目录。若目录已有正式文件，不复用该
+目录；保留失败和负面实验，另建带时间或原因后缀的新目录。
+
+```bash
+set -o pipefail
+for FER_SEED in 42 123 2026; do
+  FER_RUN_OUTPUT="${FER_OUTPUT_ROOT}/clean-seed${FER_SEED}"
+  python -m occlusion_fer.train \
+    --config configs/fer2013_resnet18_clean.yaml \
+    --data-path "${FER_DATA_CSV}" \
+    --output-dir "${FER_RUN_OUTPUT}" \
+    --seed "${FER_SEED}" \
+    --device cuda \
+    --epochs 30 \
+    --batch-size 128 \
+    --num-workers 4 \
+    --amp \
+    2>&1 | tee "${FER_OUTPUT_ROOT}/clean-seed${FER_SEED}.log" || break
+done
+```
+
+任何 seed 失败都停止循环并保留 `failure.json`、日志和已有输出，不跳过后只报告
+成功 seed。每个成功目录必须有：
+
+```text
+resolved_config.yaml
+run_metadata.json
+history.json
+history.csv
+best.pt
+last.pt
+validation/best_metrics.json
+validation/best_per_class_metrics.csv
+validation/best_confusion_matrix.csv
+validation/best_predictions.csv
+validation/last_metrics.json
+validation/last_per_class_metrics.csv
+validation/last_confusion_matrix.csv
+validation/last_predictions.csv
+```
+
+`best.pt` 由 clean PublicTest macro-F1 严格提升决定；PrivateTest 未被训练入口
+加载。检查三个 `run_metadata.json` 的 `status` 均为 `completed`、Git commit
+相同、`git_dirty` 为 `false`、seed 分别正确。
+
+## 9. 锁定后的 PrivateTest 最终评估
+
+本节命令已准备好，但当前 clean 开发阶段不要立即执行。只有在以下条件全部满足
+后才执行：clean 和 mixed 的六个正式 run 均完成；模型、超参数、九个遮挡条件、
+final masks 与 checkpoint 规则全部锁定；不再根据测试结果选择 epoch、seed、
+mask 或方法；计划报告全部三个 seed 和全部十个条件。下面的命令只是最终评估
+批次中的 clean condition，后续遮挡阶段必须补齐其余九个 condition 的同批评估。
+
+```bash
+for FER_SEED in 42 123 2026; do
+  FER_RUN_OUTPUT="${FER_OUTPUT_ROOT}/clean-seed${FER_SEED}"
+  python -m occlusion_fer.final_evaluate \
+    --config configs/fer2013_resnet18_clean.yaml \
+    --checkpoint "${FER_RUN_OUTPUT}/best.pt" \
+    --data-path "${FER_DATA_CSV}" \
+    --output-dir "${FER_RUN_OUTPUT}" \
+    --device cuda \
+    --batch-size 128 \
+    --num-workers 4 \
+    --amp \
+    --confirm-private-test || break
+done
+```
+
+该入口只加载 checkpoint、只构建 PrivateTest dataset、不创建 optimizer、不反向
+传播，并拒绝覆盖已有 `final_test/clean_metrics.json`。每个 run 新增：
+
+```text
+final_test/clean_metrics.json
+final_test/clean_per_class_metrics.csv
+final_test/clean_confusion_matrix.csv
+final_test/clean_predictions.csv
+```
+
+## 10. 指标定义与论文产物映射
+
+类别顺序始终为 `angry, disgust, fear, happy, sad, surprise, neutral`。混淆矩阵
+的行是真实标签，列是预测标签。macro-F1 对全部七类的 F1 做等权平均；零分母
+按 0 处理，不因某类样本少而移除该类。
+
+论文写作时使用原始产物建立可追溯关系：
+
+| 论文内容 | 原始证据 | 推荐呈现 |
+|---|---|---|
+| Methods：环境与复现 | `run_metadata.json` | 版本、GPU、seed、Git commit 表 |
+| Methods：训练设置 | `resolved_config.yaml` | 模型、预处理、优化器参数表 |
+| 训练过程 | `history.csv` | train loss、validation loss、accuracy、macro-F1 曲线 |
+| checkpoint 选择 | `validation/best_metrics.json` | 最佳 validation macro-F1 与对应 epoch |
+| clean 总体结果 | `final_test/clean_metrics.json` | 三 seed 的 accuracy/macro-F1 及均值、标准差 |
+| 类别差异 | `*_per_class_metrics.csv` | 每类 precision/recall/F1 表或柱状图 |
+| 错误结构 | `*_confusion_matrix.csv` | 统一色阶的混淆矩阵 |
+| 错误分析 | `*_predictions.csv` | 按 sample ID 追踪正确性、置信度和七类概率 |
+
+图表应由 CSV/JSON 自动生成，保留脚本和输入 commit；不要把图中数值手工录入。
+所有 seed 都必须报告，不能只选择最高分。当前阶段尚未提供跨种子汇总和绘图
+脚本，后续应在遮挡实验设计锁定后统一实现，以确保 clean/occluded 使用同一
+统计口径和图形模板。
+
+## 11. 失败处理与常见问题
+
+- `CUDA was requested but is not available`：确认会话仍有 GPU、`nvidia-smi` 和
+  CUDA PyTorch 均正常。
+- GPU 利用率低且 epoch 很慢：确认 `--num-workers 4`、没有其他用户大量占用
+  CPU/GPU、数据不是网络故障盘；不要盲目增加超过可用 CPU 的 worker。
+- 显存不足：先停止；若必须调整 batch size，应在任何 PrivateTest 之前锁定新值，
+  并对全部 seed 和未来对比策略统一使用。
+- `failure.json`：保留它和日志，修复后使用新输出目录；不得删除负面实验来制造
+  全部成功的印象。
+- Kaggle 401/403：检查账号许可、文件位置和 `600` 权限，不打印 token。
+- placeholder 路径：始终用 `--data-path`，不修改提交的 YAML 为个人路径。
+- 预训练权重下载失败：修复网络或缓存；不能静默切换到随机初始化并作为正式
+  ResNet-18 结果。
+- final results already exist：不覆盖。核对该 run 是否已完成最终评估；若是，
+  使用原结果；若实验协议确需重做，必须先记录原因并使用全新 run 目录。
+
+## 12. Git 与安全检查
+
+数据、图片、checkpoint、outputs、logs、runs、虚拟环境、cache、`.env`、
+`kaggle.json`、token 和 SSH 私钥都不能进入 Git。正式运行前后检查：
+
+```bash
+git status --short --branch
+git ls-files | grep -E '(fer2013\.csv|\.pt$|\.pth$|\.ckpt$|kaggle\.json|\.env$)' && echo "STOP: forbidden tracked file"
+```
+
+不要使用 `git add .` 保存实验产物。训练输出只保留在 `${FER_OUTPUT_ROOT}` 并按
+学校的数据与备份政策管理。

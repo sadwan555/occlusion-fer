@@ -1,7 +1,7 @@
 """FER2013 CSV loading and validation."""
 
 import csv
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -31,6 +31,7 @@ USAGE_TO_SPLIT: dict[str, Fer2013Split] = {
     "PublicTest": "validation",
     "PrivateTest": "test",
 }
+VALID_SPLITS: tuple[Fer2013Split, ...] = tuple(USAGE_TO_SPLIT.values())
 
 
 class Fer2013DataError(ValueError):
@@ -59,13 +60,19 @@ class Fer2013Data:
     class_counts: dict[int, int]
 
 
-def load_fer2013_csv(path: str | Path) -> Fer2013Data:
-    """Load and validate all records from a FER2013 CSV file."""
+def load_fer2013_csv(
+    path: str | Path,
+    *,
+    include_splits: Sequence[Fer2013Split] | None = None,
+) -> Fer2013Data:
+    """Load and validate all records from the requested official splits."""
     csv_path = Path(path)
     if not csv_path.is_file():
         raise FileNotFoundError(f"FER2013 CSV file not found: {csv_path}")
 
+    selected_splits = _validate_include_splits(include_splits)
     records: list[Fer2013Record] = []
+    data_row_count = 0
     split_counts = {"train": 0, "validation": 0, "test": 0}
     class_counts = {label: 0 for label in range(len(FER2013_LABEL_NAMES))}
 
@@ -76,8 +83,17 @@ def load_fer2013_csv(path: str | Path) -> Fer2013Data:
             column_indices = _required_column_indices(header)
 
             for row in reader:
+                data_row_count += 1
                 row_number = reader.line_num
-                record = _parse_record(row, row_number, column_indices)
+                split = _parse_row_split(row, row_number, column_indices)
+                if split not in selected_splits:
+                    continue
+                record = _parse_record(
+                    row,
+                    row_number,
+                    column_indices,
+                    split=split,
+                )
                 records.append(record)
                 split_counts[record.split] += 1
                 class_counts[record.label] += 1
@@ -91,13 +107,13 @@ def load_fer2013_csv(path: str | Path) -> Fer2013Data:
             f"FER2013 CSV file must be UTF-8 text: {csv_path}"
         ) from exc
 
-    if not records:
+    if data_row_count == 0:
         raise Fer2013DataError(
             f"FER2013 CSV file is empty: it contains no data rows: {csv_path}"
         )
 
-    for split, count in split_counts.items():
-        if count == 0:
+    for split in selected_splits:
+        if split_counts[split] == 0:
             raise Fer2013DataError(f"FER2013 split '{split}' is empty")
 
     return Fer2013Data(
@@ -125,17 +141,21 @@ def _required_column_indices(header: list[str]) -> dict[str, int]:
 
 
 def _parse_record(
-    row: list[str], row_number: int, column_indices: dict[str, int]
+    row: list[str],
+    row_number: int,
+    column_indices: dict[str, int],
+    *,
+    split: Fer2013Split | None = None,
 ) -> Fer2013Record:
     if not row:
         raise Fer2013DataError(f"CSV row {row_number}: row must not be empty")
 
     emotion = _row_value(row, row_number, "emotion", column_indices)
     pixels = _row_value(row, row_number, "pixels", column_indices)
-    usage = _row_value(row, row_number, "Usage", column_indices)
-
     label = _parse_label(emotion, row_number)
-    split = _parse_split(usage, row_number)
+    if split is None:
+        usage = _row_value(row, row_number, "Usage", column_indices)
+        split = _parse_split(usage, row_number)
     image = _parse_image(pixels, row_number)
 
     return Fer2013Record(
@@ -145,6 +165,41 @@ def _parse_record(
         split=split,
         image=image,
     )
+
+
+def _parse_row_split(
+    row: list[str],
+    row_number: int,
+    column_indices: dict[str, int],
+) -> Fer2013Split:
+    if not row:
+        raise Fer2013DataError(f"CSV row {row_number}: row must not be empty")
+    usage = _row_value(row, row_number, "Usage", column_indices)
+    return _parse_split(usage, row_number)
+
+
+def _validate_include_splits(
+    include_splits: Sequence[Fer2013Split] | None,
+) -> tuple[Fer2013Split, ...]:
+    if include_splits is None:
+        return VALID_SPLITS
+    if isinstance(include_splits, (str, bytes)) or not isinstance(
+        include_splits, Sequence
+    ):
+        raise Fer2013DataError(
+            "include_splits must be a non-empty sequence of official splits"
+        )
+    selected = tuple(include_splits)
+    if (
+        not selected
+        or len(set(selected)) != len(selected)
+        or any(split not in VALID_SPLITS for split in selected)
+    ):
+        allowed = ", ".join(VALID_SPLITS)
+        raise Fer2013DataError(
+            "include_splits must contain unique values from " + allowed
+        )
+    return selected
 
 
 def _row_value(

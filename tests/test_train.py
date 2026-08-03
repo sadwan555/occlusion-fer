@@ -25,6 +25,7 @@ from occlusion_fer.torch_data import Fer2013TorchDataset, create_dataloader
 from occlusion_fer.train import (
     apply_config_overrides,
     evaluate,
+    is_better_validation_macro_f1,
     limit_dataset,
     load_config_with_overrides,
     parse_args,
@@ -74,6 +75,26 @@ def make_config() -> AppConfig:
         ),
         output=OutputConfig(directory="outputs/smoke"),
     )
+
+
+def test_macro_f1_checkpoint_rule_requires_strict_improvement() -> None:
+    assert is_better_validation_macro_f1(0.61, 0.60)
+    assert not is_better_validation_macro_f1(0.60, 0.60)
+    assert not is_better_validation_macro_f1(0.59, 0.60)
+
+
+@pytest.mark.parametrize("value", [-0.1, 1.1, float("nan"), float("inf")])
+def test_macro_f1_checkpoint_rule_rejects_invalid_candidate(
+    value: float,
+) -> None:
+    with pytest.raises(ValueError, match=r"candidate.*finite.*0 and 1"):
+        is_better_validation_macro_f1(value, 0.5)
+
+
+@pytest.mark.parametrize("value", [-0.1, 1.1, float("nan"), float("inf")])
+def test_macro_f1_checkpoint_rule_rejects_invalid_best(value: float) -> None:
+    with pytest.raises(ValueError, match=r"best.*finite.*-1 and 1"):
+        is_better_validation_macro_f1(0.5, value)
 
 
 @pytest.mark.parametrize("seed", [0, 42])
@@ -340,7 +361,9 @@ def test_save_checkpoint_creates_reloadable_best_file(tmp_path: Path) -> None:
         model=model,
         optimizer=optimizer,
         epoch=1,
-        best_validation_accuracy=0.25,
+        best_validation_macro_f1=0.25,
+        validation_accuracy=0.3,
+        validation_macro_f1=0.25,
         seed=42,
         device=torch.device("cpu"),
         resolved_config=asdict(make_config()),
@@ -355,13 +378,17 @@ def test_save_checkpoint_creates_reloadable_best_file(tmp_path: Path) -> None:
         "model_state_dict",
         "optimizer_state_dict",
         "epoch",
-        "best_validation_accuracy",
+        "best_validation_macro_f1",
+        "validation_accuracy",
+        "validation_macro_f1",
         "seed",
         "device",
         "resolved_config",
     } <= loaded.keys()
     assert loaded["epoch"] == 1
-    assert loaded["best_validation_accuracy"] == pytest.approx(0.25)
+    assert loaded["best_validation_macro_f1"] == pytest.approx(0.25)
+    assert loaded["validation_accuracy"] == pytest.approx(0.3)
+    assert loaded["validation_macro_f1"] == pytest.approx(0.25)
     assert loaded["seed"] == 42
     assert loaded["device"] == "cpu"
     assert isinstance(loaded["resolved_config"], dict)
@@ -379,7 +406,9 @@ def test_save_checkpoint_supports_last_file_and_grad_scaler_state(
         model=model,
         optimizer=optimizer,
         epoch=2,
-        best_validation_accuracy=0.5,
+        best_validation_macro_f1=0.5,
+        validation_accuracy=0.6,
+        validation_macro_f1=0.5,
         seed=42,
         device=torch.device("cpu"),
         resolved_config=asdict(make_config()),
@@ -424,6 +453,8 @@ def test_apply_config_overrides_changes_only_runtime_copy() -> None:
         original,
         data_path="/runtime/data.csv",
         output_directory="/runtime/output",
+        seed=123,
+        device="cuda",
         epochs=3,
         batch_size=64,
         num_workers=4,
@@ -431,11 +462,14 @@ def test_apply_config_overrides_changes_only_runtime_copy() -> None:
 
     assert resolved.dataset.path == "/runtime/data.csv"
     assert resolved.output.directory == "/runtime/output"
+    assert resolved.training.seed == 123
+    assert resolved.training.device == "cuda"
     assert resolved.training.epochs == 3
     assert resolved.training.batch_size == 64
     assert resolved.training.num_workers == 4
     assert original.dataset.path == "/path/to/fer2013.csv"
     assert original.output.directory == "outputs/smoke"
+    assert original.training.seed == 42
     assert original.training.epochs == 1
     assert original.training.batch_size == 32
     assert original.training.num_workers == 0
@@ -455,6 +489,18 @@ def test_apply_config_overrides_rejects_invalid_num_workers(
 ) -> None:
     with pytest.raises(ValueError, match=r"num_workers.*non-negative integer"):
         apply_config_overrides(make_config(), num_workers=num_workers)
+
+
+@pytest.mark.parametrize("seed", [-1, 1.5, True, "123"])
+def test_apply_config_overrides_rejects_invalid_seed(seed: object) -> None:
+    with pytest.raises(ValueError, match=r"seed.*non-negative integer"):
+        apply_config_overrides(make_config(), seed=seed)
+
+
+@pytest.mark.parametrize("device", ["gpu", "CUDA", "", 1])
+def test_apply_config_overrides_rejects_invalid_device(device: object) -> None:
+    with pytest.raises(ValueError, match=r"device override.*auto.*cpu.*mps.*cuda"):
+        apply_config_overrides(make_config(), device=device)
 
 
 def test_load_config_with_overrides_does_not_modify_yaml(tmp_path: Path) -> None:
@@ -488,6 +534,8 @@ output:
         config_path,
         data_path="/runtime/data.csv",
         output_directory="/runtime/output",
+        seed=123,
+        device="cuda",
         epochs=2,
         batch_size=64,
         num_workers=4,
@@ -495,6 +543,8 @@ output:
 
     assert resolved.dataset.path == "/runtime/data.csv"
     assert resolved.output.directory == "/runtime/output"
+    assert resolved.training.seed == 123
+    assert resolved.training.device == "cuda"
     assert resolved.training.epochs == 2
     assert resolved.training.batch_size == 64
     assert resolved.training.num_workers == 4
@@ -510,6 +560,10 @@ def test_parse_args_supports_all_smoke_overrides() -> None:
             "/runtime/data.csv",
             "--output-dir",
             "/runtime/output",
+            "--seed",
+            "123",
+            "--device",
+            "cuda",
             "--epochs",
             "2",
             "--batch-size",
@@ -527,6 +581,8 @@ def test_parse_args_supports_all_smoke_overrides() -> None:
     assert args.config == "config.yaml"
     assert args.data_path == "/runtime/data.csv"
     assert args.output_dir == "/runtime/output"
+    assert args.seed == 123
+    assert args.device == "cuda"
     assert args.epochs == 2
     assert args.batch_size == 64
     assert args.num_workers == 4
@@ -538,6 +594,33 @@ def test_parse_args_supports_all_smoke_overrides() -> None:
 def test_run_training_rejects_placeholder_data_path_before_model_creation() -> None:
     with pytest.raises(FileNotFoundError, match=r"placeholder.*--data-path"):
         run_training(make_config())
+
+
+def test_run_training_refuses_existing_output_without_modifying_it(
+    tmp_path: Path,
+) -> None:
+    csv_path = tmp_path / "fer2013.csv"
+    csv_path.write_text("present", encoding="utf-8")
+    output_directory = tmp_path / "completed-run"
+    output_directory.mkdir()
+    metadata_path = output_directory / "run_metadata.json"
+    metadata_path.write_text(
+        '{"status": "completed"}\n', encoding="utf-8"
+    )
+    original = make_config()
+    config = replace(
+        original,
+        dataset=replace(original.dataset, path=str(csv_path)),
+        output=replace(original.output, directory=str(output_directory)),
+    )
+
+    with pytest.raises(FileExistsError, match=r"new output directory"):
+        run_training(config)
+
+    assert metadata_path.read_text(encoding="utf-8") == (
+        '{"status": "completed"}\n'
+    )
+    assert not (output_directory / "failure.json").exists()
 
 
 def test_artificial_cpu_training_validation_checkpoint_flow(tmp_path: Path) -> None:
@@ -554,7 +637,9 @@ def test_artificial_cpu_training_validation_checkpoint_flow(tmp_path: Path) -> N
         model=model,
         optimizer=optimizer,
         epoch=1,
-        best_validation_accuracy=validation_result.accuracy,
+        best_validation_macro_f1=validation_result.macro_f1,
+        validation_accuracy=validation_result.accuracy,
+        validation_macro_f1=validation_result.macro_f1,
         seed=42,
         device=torch.device("cpu"),
         resolved_config=asdict(make_config()),
@@ -615,7 +700,9 @@ def test_artificial_fer_resnet_full_training_chain(tmp_path: Path) -> None:
         model=model,
         optimizer=optimizer,
         epoch=1,
-        best_validation_accuracy=validation_result.accuracy,
+        best_validation_macro_f1=validation_result.macro_f1,
+        validation_accuracy=validation_result.accuracy,
+        validation_macro_f1=validation_result.macro_f1,
         seed=42,
         device=torch.device("cpu"),
         resolved_config=asdict(make_config()),
@@ -663,9 +750,27 @@ def test_run_training_saves_best_last_and_history(tmp_path: Path) -> None:
     best_path = output_directory / "best.pt"
     last_path = output_directory / "last.pt"
     history_path = output_directory / "history.json"
+    history_csv_path = output_directory / "history.csv"
+    resolved_config_path = output_directory / "resolved_config.yaml"
+    run_metadata_path = output_directory / "run_metadata.json"
     assert best_path.is_file()
     assert last_path.is_file()
     assert history_path.is_file()
+    assert history_csv_path.is_file()
+    assert resolved_config_path.is_file()
+    assert run_metadata_path.is_file()
+    for checkpoint_role in ("best", "last"):
+        for suffix in (
+            "metrics.json",
+            "per_class_metrics.csv",
+            "confusion_matrix.csv",
+            "predictions.csv",
+        ):
+            assert (
+                output_directory
+                / "validation"
+                / f"{checkpoint_role}_{suffix}"
+            ).is_file()
 
     history = json.loads(history_path.read_text(encoding="utf-8"))
     assert len(history) == 1
@@ -681,6 +786,21 @@ def test_run_training_saves_best_last_and_history(tmp_path: Path) -> None:
     assert np.isfinite(epoch_record["train_loss"])
     assert np.isfinite(epoch_record["validation_loss"])
     assert 0.0 <= epoch_record["validation_accuracy"] <= 1.0
+    assert 0.0 <= epoch_record["validation_macro_f1"] <= 1.0
+    assert epoch_record["updated_best_checkpoint"] is True
+
+    metadata = json.loads(run_metadata_path.read_text(encoding="utf-8"))
+    assert metadata["status"] == "completed"
+    assert metadata["seed"] == 42
+    assert metadata["training_mode"] == "clean"
+    assert metadata["artifacts"]["history_json"] == "history.json"
+
+    with (
+        output_directory / "validation" / "best_predictions.csv"
+    ).open("r", encoding="utf-8", newline="") as predictions_file:
+        prediction_rows = list(csv.DictReader(predictions_file))
+    assert {row["sample_id"] for row in prediction_rows} == {"4", "5"}
+    assert all(row["split"] == "validation" for row in prediction_rows)
 
     last_checkpoint = torch.load(
         last_path, map_location="cpu", weights_only=False
@@ -690,3 +810,58 @@ def test_run_training_saves_best_last_and_history(tmp_path: Path) -> None:
     assert runtime["pin_memory"] is False
     assert runtime["persistent_workers"] is False
     assert runtime["prefetch_factor"] is None
+    assert 0.0 <= last_checkpoint["best_validation_macro_f1"] <= 1.0
+    assert 0.0 <= last_checkpoint["validation_macro_f1"] <= 1.0
+
+
+def test_run_training_records_failure_after_run_artifacts_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    csv_path = tmp_path / "fer2013.csv"
+    pixels = " ".join(["128"] * (48 * 48))
+    with csv_path.open("w", encoding="utf-8", newline="") as csv_file:
+        writer = csv.writer(csv_file)
+        writer.writerow(["emotion", "pixels", "Usage"])
+        writer.writerows(
+            [
+                (0, pixels, "Training"),
+                (1, pixels, "PublicTest"),
+                (2, pixels, "PrivateTest"),
+            ]
+        )
+    original = make_config()
+    output_directory = tmp_path / "failed-run"
+    config = replace(
+        original,
+        dataset=replace(original.dataset, path=str(csv_path)),
+        model=replace(original.model, pretrained=False),
+        training=replace(
+            original.training,
+            batch_size=1,
+            num_workers=0,
+            device="cpu",
+        ),
+        output=replace(original.output, directory=str(output_directory)),
+    )
+
+    def fail_training(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise RuntimeError("synthetic training failure")
+
+    monkeypatch.setattr("occlusion_fer.train.train_one_epoch", fail_training)
+
+    with pytest.raises(RuntimeError, match="synthetic training failure"):
+        run_training(config)
+
+    failure = json.loads(
+        (output_directory / "failure.json").read_text(encoding="utf-8")
+    )
+    metadata = json.loads(
+        (output_directory / "run_metadata.json").read_text(encoding="utf-8")
+    )
+    assert failure["stage"] == "training"
+    assert failure["exception_type"] == "RuntimeError"
+    assert failure["message"] == "synthetic training failure"
+    assert metadata["status"] == "failed"
+    assert metadata["artifacts"]["failure"] == "failure.json"

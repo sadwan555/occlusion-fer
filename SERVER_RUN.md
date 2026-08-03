@@ -4,26 +4,10 @@ For detailed instructions, see docs/server_runbook.md
 
 ## 项目简介
 
-本项目使用 FER2013 的七个数据集标签训练 ResNet-18，并研究合成面部遮挡对
-分类性能的影响。数据、模型权重和实验输出必须保存在 Git 仓库外。
-
-本页是服务器快速开始指南；环境解释、排错方法和安全边界请阅读
-[`docs/server_runbook.md`](docs/server_runbook.md)。
+本项目在 FER2013 数据集标签上训练 ImageNet 预训练 ResNet-18，并为后续遮挡
+鲁棒性实验提供 clean baseline。数据、权重、输出和密钥必须保存在 Git 仓库外。
 
 ## 1. 服务器环境准备
-
-先确认基础环境和 NVIDIA GPU：
-
-```bash
-whoami
-uname -a
-nvidia-smi
-df -h
-git --version
-python3 --version
-```
-
-在个人目录创建互相隔离的项目、数据、环境和输出目录：
 
 ```bash
 export FER_ROOT="${HOME}/anson-fer"
@@ -32,115 +16,93 @@ export FER_DATA="${FER_ROOT}/data/raw"
 export FER_ENV="${FER_ROOT}/envs/occlusion-fer"
 export FER_OUTPUT="${FER_ROOT}/outputs"
 
+nvidia-smi
 mkdir -p "${FER_ROOT}/project" "${FER_DATA}" "${FER_ROOT}/envs" "${FER_OUTPUT}"
 git clone git@github.com:sadwan555/occlusion-fer.git "${FER_PROJECT}"
 cd "${FER_PROJECT}"
-git status
+git status --short --branch
 ```
 
 ## 2. 创建并激活 Python 环境
 
-项目要求 Python 3.10 或更高版本：
-
 ```bash
 python3 -m venv "${FER_ENV}"
 source "${FER_ENV}/bin/activate"
-python --version
 python -m pip install --upgrade pip
 ```
 
-每次重新登录服务器后，都要重新设置上面的 `FER_*` 变量并激活环境。
+每次重新登录后，重新设置 `FER_*` 变量并激活该环境。
 
 ## 3. 安装依赖
 
-不要猜测或固定 CUDA wheel 地址。根据当天服务器的 `nvidia-smi` 输出，在
-[PyTorch Start Locally](https://docs.pytorch.org/get-started/locally/) 选择 Linux、
-Pip、Python 和适合该服务器的 CUDA 版本，安装匹配的 `torch` 与
-`torchvision`。
-
-然后安装项目和测试依赖：
+先按 [PyTorch Start Locally](https://docs.pytorch.org/get-started/locally/)
+安装与服务器驱动匹配的 Linux CUDA 版 PyTorch，再安装项目：
 
 ```bash
 cd "${FER_PROJECT}"
 python -m pip install -e ".[test]"
 python -m pip check
-python -c "import torch, torchvision; print(torch.__version__); print(torchvision.__version__); print(torch.cuda.is_available())"
+python -c "import torch, torchvision; print(torch.__version__, torchvision.__version__); print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
 ```
 
-只有 `pip check` 无错误且 `torch.cuda.is_available()` 为 `True` 时，才继续 GPU
-检查。
+项目依赖范围与 HIVE 已验证组合 `torch 2.5.x + torchvision 0.20.x` 一致。
 
 ## 4. 下载 FER2013 数据集
 
-在服务器上配置 Kaggle 凭据，确保 `kaggle.json` 不在仓库中：
+把 Kaggle API 凭据放在服务器的 `${HOME}/.kaggle/kaggle.json`，设置权限；CSV
+直接下载到服务器，不经过 Mac 保存大数据集：
 
 ```bash
 mkdir -p "${HOME}/.kaggle"
 chmod 700 "${HOME}/.kaggle"
 chmod 600 "${HOME}/.kaggle/kaggle.json"
 python -m pip install kaggle
-```
-
-先确认数据条目包含项目需要的 `fer2013.csv`，再直接下载到仓库外：
-
-```bash
 kaggle datasets files -d deadskull7/fer2013
 kaggle datasets download -d deadskull7/fer2013 -p "${FER_DATA}" --unzip
 ls -lh "${FER_DATA}/fer2013.csv"
 ```
 
-CSV 必须包含 `emotion,pixels,Usage`，并保留 `Training`、`PublicTest` 和
-`PrivateTest` 的官方含义。不要把 CSV 或解压后的图片加入 Git。
-
 ## 5. Preflight 检查
 
-preflight 会检查环境、CSV、split、一个 train/validation batch、一次随机初始化
-ResNet-18 forward 和输出目录；它不会训练或保存 checkpoint。
-
 ```bash
-cd "${FER_PROJECT}"
 python -m occlusion_fer.preflight \
   --config configs/fer2013_resnet18_clean.yaml \
   --data-path "${FER_DATA}/fer2013.csv" \
   --output-dir "${FER_OUTPUT}/preflight" \
   --device cuda \
-  --batch-size 8 \
-  --max-train-samples 32 \
-  --max-validation-samples 16
+  --batch-size 32
 ```
 
 只有末尾出现 `PREFLIGHT PASSED` 才继续。
 
 ## 6. 训练入口
 
-先运行一次小样本、单 epoch GPU smoke test，不要直接开始正式实验：
+先做性能 smoke test：
 
 ```bash
 python -m occlusion_fer.train \
   --config configs/fer2013_resnet18_clean.yaml \
   --data-path "${FER_DATA}/fer2013.csv" \
   --output-dir "${FER_OUTPUT}/clean-smoke" \
-  --epochs 1 \
-  --max-train-samples 512 \
-  --max-validation-samples 128
+  --seed 42 --device cuda --epochs 1 \
+  --batch-size 128 --num-workers 4 --amp \
+  --max-train-samples 8192 --max-validation-samples 1024
 ```
 
-确认日志显示 `selected_device=cuda`、loss 为有限数，并生成
-`${FER_OUTPUT}/clean-smoke/best.pt`。这仍然不是正式实验。
+确认 smoke 成功后，删除样本上限并分别使用 seeds `42`、`123`、`2026`，每个
+run 使用独立输出目录和相同的 30 epoch 参数。完整三种子命令与最终 PrivateTest
+步骤见 [`docs/server_runbook.md`](docs/server_runbook.md)。
 
 ## 7. 常见问题
 
-- **`CUDA was requested but is not available`**：确认当前会话已分配 GPU，并重新
-  检查 `nvidia-smi`、PyTorch 安装和 `torch.cuda.is_available()`。
-- **Kaggle 返回 401/403**：检查 `kaggle.json`、文件权限和 Kaggle 账号访问权限；
-  不要在终端或日志中打印凭据内容。
-- **提示数据路径仍是 placeholder**：必须通过 `--data-path` 指向仓库外的真实
-  `fer2013.csv`，不要修改提交到 Git 的 YAML 为个人绝对路径。
-- **CSV 解析失败**：确认表头、2304 个像素、0–6 标签和三个官方 split；不要
-  静默跳过错误样本。
-- **GPU 显存不足**：先减小 batch size；不要在失败状态下开始正式训练。
-- **预训练权重下载失败**：检查服务器网络或缓存，不要静默改成随机初始化后
-  冒充正式 ResNet-18 结果。
-
-任何一步失败都应停止并保存完整错误信息。详细排错和正式实验边界见
-[`docs/server_runbook.md`](docs/server_runbook.md)。
+- CUDA 不可用：检查当前会话、`nvidia-smi` 和 CUDA 版 PyTorch。
+- GPU 利用率低：确认使用 `--num-workers 4`；HIVE 实测 workers 为 0 会严重
+  阻塞数据供应。
+- Kaggle 401/403：检查账号访问权限及 `kaggle.json` 的位置和 `600` 权限，
+  不要输出文件内容。
+- 数据路径是 placeholder：通过 `--data-path` 覆盖，不要把个人绝对路径写回
+  YAML。
+- 显存不足：减小 batch size，并为所有对比实验统一记录新值；不要只改变某个
+  seed。
+- 已存在最终结果：`final_evaluate` 会拒绝覆盖，保留原始证据并使用新的、明确
+  命名的正式 run 目录。

@@ -252,3 +252,61 @@ def test_rejects_empty_official_split(
 
     with pytest.raises(Fer2013DataError, match=rf"{expected_split}.*empty"):
         load_fer2013_csv(write_csv(tmp_path, rows))
+
+
+def test_loads_only_requested_splits_without_parsing_excluded_pixels(
+    tmp_path: Path,
+) -> None:
+    rows = valid_rows()
+    rows[-1]["pixels"] = "not parsed for excluded PrivateTest"
+
+    data = load_fer2013_csv(
+        write_csv(tmp_path, rows),
+        include_splits=("train", "validation"),
+    )
+
+    assert {record.split for record in data.records} == {
+        "train",
+        "validation",
+    }
+    assert data.train_count == 1
+    assert data.validation_count == 1
+    assert data.test_count == 0
+
+
+def test_requested_split_still_validates_its_pixels(tmp_path: Path) -> None:
+    rows = valid_rows()
+    rows[-1]["pixels"] = "invalid"
+
+    with pytest.raises(Fer2013DataError, match=r"pixels.*2304"):
+        load_fer2013_csv(
+            write_csv(tmp_path, rows),
+            include_splits=("test",),
+        )
+
+
+def test_missing_requested_split_reports_that_split_as_empty(
+    tmp_path: Path,
+) -> None:
+    rows = [row for row in valid_rows() if row["Usage"] != "PrivateTest"]
+
+    with pytest.raises(Fer2013DataError, match=r"split 'test' is empty"):
+        load_fer2013_csv(
+            write_csv(tmp_path, rows),
+            include_splits=("test",),
+        )
+
+
+@pytest.mark.parametrize(
+    "include_splits",
+    [(), ("invalid",), ("train", "train"), "train"],
+)
+def test_rejects_invalid_requested_splits(
+    tmp_path: Path,
+    include_splits: object,
+) -> None:
+    with pytest.raises(Fer2013DataError, match=r"include_splits"):
+        load_fer2013_csv(
+            write_csv(tmp_path, valid_rows()),
+            include_splits=include_splits,
+        )
