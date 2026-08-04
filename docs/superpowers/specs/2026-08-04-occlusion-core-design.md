@@ -212,19 +212,38 @@ source_pixel_range            = [0, 255]
 normalized_pixel_range        = [0.0, 1.0]
 accumulator_dtype             = uint64
 mean_algorithm_version        = training-mean-v1
-created_at_utc
 ```
 
-`created_at_utc` is ISO-8601 UTC with second precision and a trailing `Z`. The
-artifact is written atomically outside Git. A loader validates every fixed
-field, integer count, finite range, algorithm version, and digest shape. It
-also hashes the runtime CSV and requires exact equality with
-`dataset_sha256`. A mismatch fails before any mask is generated.
+Generation time is event metadata, not part of the deterministic mean
+artifact. The command's run metadata or log records `created_at_utc` in
+ISO-8601 UTC with second precision and a trailing `Z`.
+
+The mean artifact bytes are exactly:
+
+```python
+json.dumps(
+    artifact,
+    ensure_ascii=True,
+    allow_nan=False,
+    sort_keys=True,
+    separators=(",", ":"),
+).encode("utf-8") + b"\n"
+```
+
+No indentation, additional whitespace, byte-order marker, or additional
+newline is permitted. The artifact is written atomically outside Git. The
+existing indented JSON artifact helper is not used for these canonical bytes.
+A loader validates every fixed field, exact field set, integer count, finite
+range, algorithm version, and digest shape. It also hashes the runtime CSV and
+requires exact equality with `dataset_sha256`. A mismatch fails before any
+mask is generated.
 
 The artifact SHA-256 is computed from the exact closed artifact bytes and is
-recorded as `mean_artifact_sha256` wherever the artifact is consumed. The
-runtime path is supplied through validated configuration or a command-line
-override and is never hard-coded into source or committed YAML.
+recorded as `mean_artifact_sha256` wherever the artifact is consumed. The same
+FER2013 CSV and `training-mean-v1` algorithm must reproduce identical artifact
+bytes and the same SHA-256 on macOS and Linux. The runtime path is supplied
+through validated configuration or a command-line override and is never
+hard-coded into source or committed YAML.
 
 ## 7. Mask geometry
 
@@ -418,9 +437,11 @@ type_index  = u64_type  % 3
 ratio_index = u64_ratio % 3
 ```
 
-The index orders are the locked orders in Section 7, so each of the nine
-type-ratio combinations has theoretical unconditional probability `0.5 / 9`.
-The label is absent from every payload and decision.
+The index orders are the locked orders in Section 7. Each of the nine
+type-ratio combinations therefore has an unconditional probability
+approximately equal to `0.5 / 9`. The negligible modulo bias introduced by
+`u64 % 3` is accepted as part of `occlusion-v1`. The label is absent from every
+payload and decision.
 
 After the selected condition is canonicalized, random-square coordinates use:
 
@@ -756,6 +777,8 @@ Configuration and artifact tests cover:
 - formal image size other than 112;
 - dataset SHA-256 mismatch;
 - malformed or internally inconsistent Training mean artifacts;
+- non-canonical Training mean JSON bytes or an unexpected field;
+- different Training mean bytes or SHA-256 for the same fixed input content;
 - a manifest target with different bytes;
 - unexpected manifest row count or duplicate PublicTest sample IDs.
 
@@ -1022,6 +1045,8 @@ The Stage A design is accepted when it satisfies all of the following:
   device, label, and sample ID;
 - the Training mean is derived only from 66,145,536 original Training pixels
   and is bound to the runtime CSV digest;
+- the Training mean artifact excludes event time, uses canonical JSON bytes,
+  and has a stable cross-platform SHA-256 for the same CSV;
 - normalized fill metadata and preprocessing equivalence are specified;
 - PublicTest manifest canonical bytes, integer facts, SHA-256, and
   create-or-verify persistence are exact;
