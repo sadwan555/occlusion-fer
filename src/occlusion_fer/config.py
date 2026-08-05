@@ -60,6 +60,12 @@ class EarlyStoppingConfig:
 
 
 @dataclass(frozen=True)
+class LossConfig:
+    type: str = "cross_entropy"
+    label_smoothing: float = 0.0
+
+
+@dataclass(frozen=True)
 class TrainingConfig:
     mode: str
     seed: int
@@ -69,6 +75,7 @@ class TrainingConfig:
     weight_decay: float
     num_workers: int
     device: str
+    loss: LossConfig = field(default_factory=LossConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     early_stopping: EarlyStoppingConfig = field(
         default_factory=EarlyStoppingConfig
@@ -157,6 +164,7 @@ def load_config(path: str | Path) -> AppConfig:
         raise ConfigError(
             "training.weight_decay must be greater than or equal to 0"
         )
+    loss = _parse_loss(training)
     num_workers = _require_nonnegative_integer(
         training, "num_workers", "training.num_workers"
     )
@@ -260,6 +268,7 @@ def load_config(path: str | Path) -> AppConfig:
             weight_decay=float(weight_decay),
             num_workers=num_workers,
             device=device,
+            loss=loss,
             scheduler=SchedulerConfig(
                 type=scheduler_type,
                 warmup_epochs=warmup_epochs,
@@ -399,6 +408,32 @@ def _optional_bool(
     if key not in mapping:
         return default
     return _require_bool(mapping, key, field_name)
+
+
+def _parse_loss(training: Mapping[str, object]) -> LossConfig:
+    loss = _optional_mapping(training, "loss", "training.loss")
+    loss_type = _optional_string(
+        loss,
+        "type",
+        "training.loss.type",
+        default="cross_entropy",
+    )
+    if loss_type != "cross_entropy":
+        raise ConfigError("training.loss.type must be cross_entropy")
+    label_smoothing = _optional_finite_number(
+        loss,
+        "label_smoothing",
+        "training.loss.label_smoothing",
+        default=0.0,
+    )
+    if not 0.0 <= label_smoothing <= 1.0:
+        raise ConfigError(
+            "training.loss.label_smoothing must be between 0 and 1"
+        )
+    return LossConfig(
+        type=loss_type,
+        label_smoothing=float(label_smoothing),
+    )
 
 
 def _parse_augmentation(

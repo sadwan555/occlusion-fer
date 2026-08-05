@@ -19,7 +19,13 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 from torch.utils.data import Dataset, Subset
 
-from occlusion_fer.config import AppConfig, EarlyStoppingConfig, load_config
+from occlusion_fer.config import (
+    AppConfig,
+    EarlyStoppingConfig,
+    LossConfig,
+    TrainingConfig,
+    load_config,
+)
 from occlusion_fer.data import load_fer2013_csv
 from occlusion_fer.evaluation import EvaluationResult, evaluate
 from occlusion_fer.artifacts import (
@@ -32,6 +38,7 @@ from occlusion_fer.artifacts import (
     write_resolved_config,
 )
 from occlusion_fer.models import create_resnet18
+from occlusion_fer.losses import build_training_criterion
 from occlusion_fer.schedulers import EpochLearningRateScheduler
 from occlusion_fer.torch_data import Fer2013TorchDataset, create_dataloader
 
@@ -128,6 +135,7 @@ def train_one_epoch(
     optimizer: torch.optim.Optimizer,
     device: torch.device,
     *,
+    criterion: nn.Module | None = None,
     amp_enabled: bool = False,
     scaler: torch.amp.GradScaler | None = None,
 ) -> TrainingResult:
@@ -135,6 +143,10 @@ def train_one_epoch(
     _validate_amp(amp_enabled, device)
     if amp_enabled and scaler is None:
         raise ValueError("AMP training requires a GradScaler")
+    if criterion is None:
+        criterion = build_training_criterion(LossConfig())
+    if not isinstance(criterion, nn.Module):
+        raise ValueError("criterion must be a torch.nn.Module")
     model.train()
     total_loss = 0.0
     correct_predictions = 0
@@ -150,7 +162,7 @@ def train_one_epoch(
         with _autocast_context(amp_enabled):
             logits = model(images)
             _validate_logits(logits, batch_size)
-            loss = F.cross_entropy(logits, labels)
+            loss = criterion(logits, labels)
         loss_value = _validated_loss_value(loss)
         correct_predictions += int(
             (logits.detach().argmax(dim=1) == labels).sum().item()
@@ -187,6 +199,17 @@ def limit_dataset(
     if actual_count == len(dataset):
         return dataset
     return Subset(dataset, range(actual_count))
+
+
+def build_optimizer(
+    model: nn.Module, training: TrainingConfig
+) -> torch.optim.AdamW:
+    """Build the single AdamW optimizer from the resolved training config."""
+    return torch.optim.AdamW(
+        model.parameters(),
+        lr=training.learning_rate,
+        weight_decay=training.weight_decay,
+    )
 
 
 def apply_config_overrides(
@@ -484,11 +507,8 @@ def _run_training(
         num_classes=config.dataset.num_classes,
         pretrained=config.model.pretrained,
     ).to(device)
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=config.training.learning_rate,
-        weight_decay=config.training.weight_decay,
-    )
+    optimizer = build_optimizer(model, config.training)
+    training_criterion = build_training_criterion(config.training.loss)
     scheduler = (
         None
         if config.training.scheduler.type == "none"
@@ -529,6 +549,7 @@ def _run_training(
             train_loader,
             optimizer,
             device,
+            criterion=training_criterion,
             amp_enabled=amp_enabled,
             scaler=scaler,
         )

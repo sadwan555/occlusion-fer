@@ -6,7 +6,8 @@ from pathlib import Path
 import pytest
 import torch
 
-from occlusion_fer.config import AugmentationConfig, load_config
+import occlusion_fer.evaluation as evaluation_module
+from occlusion_fer.config import AugmentationConfig, LossConfig, load_config
 from occlusion_fer.final_evaluate import (
     load_checkpoint_model_state,
     parse_args,
@@ -155,6 +156,7 @@ def test_load_checkpoint_model_state_rejects_non_finite_tensor(
 
 def test_final_evaluation_uses_only_private_test_and_writes_artifacts(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     csv_path = write_artificial_csv(tmp_path)
     output = tmp_path / "run"
@@ -165,7 +167,22 @@ def test_final_evaluation_uses_only_private_test_and_writes_artifacts(
             config.dataset,
             augmentation=AugmentationConfig(type="mild_affine"),
         ),
+        training=replace(
+            config.training,
+            loss=LossConfig(label_smoothing=0.1),
+        ),
         output=replace(config.output, directory=str(output)),
+    )
+    observed_smoothing: list[float] = []
+    original_builder = evaluation_module.build_evaluation_criterion
+
+    def recording_builder() -> torch.nn.CrossEntropyLoss:
+        criterion = original_builder()
+        observed_smoothing.append(float(criterion.label_smoothing))
+        return criterion
+
+    monkeypatch.setattr(
+        evaluation_module, "build_evaluation_criterion", recording_builder
     )
     model = create_resnet18(num_classes=7, pretrained=False)
     checkpoint_path = tmp_path / "best.pt"
@@ -195,6 +212,7 @@ def test_final_evaluation_uses_only_private_test_and_writes_artifacts(
     assert {row["sample_id"] for row in prediction_rows} == {"4", "5"}
     assert all(row["split"] == "test" for row in prediction_rows)
     assert checkpoint_path.read_bytes() == checkpoint_bytes
+    assert observed_smoothing == [0.0]
 
 
 def test_final_evaluation_refuses_to_overwrite_existing_results(

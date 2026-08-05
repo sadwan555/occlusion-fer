@@ -298,6 +298,52 @@ def test_preflight_does_not_parse_or_report_private_test(
     assert "test_class_counts=" not in output
 
 
+def test_e3_preflight_uses_unsmoothed_validation_and_skips_private_test(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    csv_path = write_csv(tmp_path)
+    rows = []
+    with csv_path.open("r", encoding="utf-8", newline="") as csv_file:
+        rows = list(csv.DictReader(csv_file))
+    for row in rows:
+        if row["Usage"] == "PrivateTest":
+            row["emotion"] = "not parsed"
+            row["pixels"] = "not parsed"
+    with csv_path.open("w", encoding="utf-8", newline="") as csv_file:
+        writer = csv.DictWriter(
+            csv_file, fieldnames=["emotion", "pixels", "Usage"]
+        )
+        writer.writeheader()
+        writer.writerows(rows)
+
+    config_path = write_config(tmp_path, data_path=str(csv_path))
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "  device: auto\n",
+            """  device: auto
+  loss:
+    type: cross_entropy
+    label_smoothing: 0.1
+""",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    args = parse_args(
+        config_path,
+        "--device",
+        "cpu",
+        "--skip-model-forward",
+    )
+
+    result = preflight.run_preflight(args)
+
+    output = capsys.readouterr().out
+    assert result.success is True
+    assert "test_samples=" not in output
+    assert "test_class_counts=" not in output
+
+
 def test_missing_classes_are_warnings_not_failures(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

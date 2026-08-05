@@ -4,6 +4,7 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
+import occlusion_fer.evaluation as evaluation_module
 from occlusion_fer.evaluation import evaluate
 
 
@@ -86,6 +87,33 @@ def test_evaluate_metrics_match_prediction_records() -> None:
     assert result.confusion_matrix[2][2] == 1
     assert result.macro_f1 == pytest.approx((1.0 + 0.0 + 2.0 / 3.0) / 7.0)
     assert np.isfinite(result.average_loss)
+
+
+def test_evaluate_always_uses_unsmoothed_cross_entropy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[float] = []
+    original_builder = evaluation_module.build_evaluation_criterion
+
+    def recording_builder() -> nn.CrossEntropyLoss:
+        criterion = original_builder()
+        observed.append(float(criterion.label_smoothing))
+        return criterion
+
+    monkeypatch.setattr(
+        evaluation_module, "build_evaluation_criterion", recording_builder
+    )
+    model = make_model()
+    loader = make_loader()
+    result = evaluate(model, loader, torch.device("cpu"))
+    expected = torch.nn.functional.cross_entropy(
+        model.lookup_logits,
+        torch.tensor([0, 1, 2]),
+        label_smoothing=0.0,
+    )
+
+    assert observed == [0.0]
+    assert result.average_loss == pytest.approx(float(expected.item()))
 
 
 def test_evaluate_rejects_duplicate_sample_ids() -> None:

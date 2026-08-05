@@ -69,6 +69,8 @@ def test_loads_valid_configuration(tmp_path: Path) -> None:
     assert config.training.batch_size == 32
     assert config.training.learning_rate == pytest.approx(0.0001)
     assert config.training.weight_decay == pytest.approx(0.0001)
+    assert config.training.loss.type == "cross_entropy"
+    assert config.training.loss.label_smoothing == pytest.approx(0.0)
     assert config.training.num_workers == 0
     assert config.training.device == "auto"
     assert config.training.scheduler.type == "none"
@@ -76,6 +78,62 @@ def test_loads_valid_configuration(tmp_path: Path) -> None:
     assert config.training.early_stopping.enabled is False
     assert config.dataset.augmentation.type == "none"
     assert config.output.directory == "outputs/smoke"
+
+
+@pytest.mark.parametrize("label_smoothing", [0.0, 0.1, 1.0])
+def test_loads_cross_entropy_label_smoothing(
+    tmp_path: Path, label_smoothing: float
+) -> None:
+    content = add_training_settings(
+        VALID_CONFIG,
+        f"""\
+  loss:
+    type: cross_entropy
+    label_smoothing: {label_smoothing}
+""",
+    )
+
+    config = load_config(write_config(tmp_path, content))
+
+    assert config.training.loss.type == "cross_entropy"
+    assert config.training.loss.label_smoothing == pytest.approx(
+        label_smoothing
+    )
+
+
+@pytest.mark.parametrize(
+    "label_smoothing", ["-0.1", "1.1", ".nan", ".inf", "'0.1'"]
+)
+def test_rejects_invalid_label_smoothing(
+    tmp_path: Path, label_smoothing: str
+) -> None:
+    content = add_training_settings(
+        VALID_CONFIG,
+        f"""\
+  loss:
+    type: cross_entropy
+    label_smoothing: {label_smoothing}
+""",
+    )
+
+    with pytest.raises(
+        ConfigError, match=r"training\.loss\.label_smoothing"
+    ):
+        load_config(write_config(tmp_path, content))
+
+
+def test_rejects_unknown_loss_type(tmp_path: Path) -> None:
+    content = add_training_settings(
+        VALID_CONFIG,
+        """\
+  loss:
+    type: focal
+    label_smoothing: 0.1
+""",
+    )
+
+    with pytest.raises(ConfigError, match=r"training\.loss\.type"):
+        load_config(write_config(tmp_path, content))
 
 
 def test_loads_mild_affine_augmentation(tmp_path: Path) -> None:
@@ -363,6 +421,8 @@ def test_repository_e0_e1_configs_differ_only_in_locked_fields() -> None:
     assert e1.training.early_stopping.enabled is False
     assert e0.dataset.augmentation.type == "none"
     assert e1.dataset.augmentation.type == "none"
+    assert e0.training.loss.label_smoothing == pytest.approx(0.0)
+    assert e1.training.loss.label_smoothing == pytest.approx(0.0)
 
     e0_values = asdict(e0)
     e1_values = asdict(e1)
@@ -398,6 +458,46 @@ def test_repository_e2_differs_from_e0_only_in_allowed_fields() -> None:
         values["dataset"].pop("augmentation")
         values["output"].pop("directory")
     assert e0_values == e2_values
+
+
+def test_repository_e3_differs_from_e0_only_in_allowed_fields() -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    config_root = repository_root / "configs" / "experiments"
+
+    e0 = load_config(config_root / "fer2013_resnet18_e0_baseline.yaml")
+    e3 = load_config(config_root / "fer2013_resnet18_e3_regularization.yaml")
+    assert e3.project.experiment_name == "e3_regularization"
+    assert e3.dataset.augmentation.type == "none"
+    assert e3.training.loss.type == "cross_entropy"
+    assert e3.training.loss.label_smoothing == pytest.approx(0.1)
+    assert e3.training.weight_decay == pytest.approx(0.001)
+    assert e3.training.learning_rate == pytest.approx(0.0001)
+    assert e3.training.scheduler.type == "none"
+    assert e3.training.scheduler.warmup_epochs == 0
+    assert e3.training.early_stopping.enabled is False
+
+    e0_values = asdict(e0)
+    e3_values = asdict(e3)
+    for values in (e0_values, e3_values):
+        values["project"].pop("experiment_name")
+        values["output"].pop("directory")
+        values["training"].pop("weight_decay")
+        values["training"]["loss"].pop("label_smoothing")
+    assert e0_values == e3_values
+
+
+def test_repository_e0_e1_e2_default_to_unsmoothed_loss() -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    config_root = repository_root / "configs" / "experiments"
+
+    for name in (
+        "fer2013_resnet18_e0_baseline.yaml",
+        "fer2013_resnet18_e1_warmup_cosine.yaml",
+        "fer2013_resnet18_e2_mild_augmentation.yaml",
+    ):
+        loss = load_config(config_root / name).training.loss
+        assert loss.type == "cross_entropy"
+        assert loss.label_smoothing == pytest.approx(0.0)
 
 
 def test_rejects_empty_project_name(tmp_path: Path) -> None:

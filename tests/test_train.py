@@ -12,11 +12,14 @@ from torch import nn
 from torch.nn import functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
+import occlusion_fer.evaluation as evaluation_module
+import occlusion_fer.train as train_module
 from occlusion_fer.config import (
     AppConfig,
     AugmentationConfig,
     DatasetConfig,
     EarlyStoppingConfig,
+    LossConfig,
     ModelConfig,
     OutputConfig,
     ProjectConfig,
@@ -25,11 +28,13 @@ from occlusion_fer.config import (
 )
 from occlusion_fer.data import Fer2013Data, Fer2013Record
 from occlusion_fer.models import create_resnet18
+from occlusion_fer.losses import build_training_criterion
 from occlusion_fer.schedulers import EpochLearningRateScheduler
 from occlusion_fer.torch_data import Fer2013TorchDataset, create_dataloader
 from occlusion_fer.train import (
     EarlyStopping,
     apply_config_overrides,
+    build_optimizer,
     evaluate,
     is_better_validation_macro_f1,
     limit_dataset,
@@ -190,6 +195,53 @@ def test_train_one_epoch_returns_weighted_loss_and_sample_count() -> None:
     assert result.average_loss == pytest.approx(expected_loss)
     assert result.accuracy == pytest.approx(expected_accuracy)
     assert np.isfinite(result.average_loss)
+
+
+def test_train_one_epoch_uses_configured_label_smoothing() -> None:
+    model = make_model()
+    loader = make_loader(sample_count=5, batch_size=2)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.0)
+    images = torch.cat([batch[0] for batch in loader])
+    labels = torch.cat([batch[1] for batch in loader])
+    with torch.no_grad():
+        expected = F.cross_entropy(
+            model(images), labels, label_smoothing=0.1
+        ).item()
+
+    result = train_one_epoch(
+        model,
+        loader,
+        optimizer,
+        torch.device("cpu"),
+        criterion=build_training_criterion(
+            LossConfig(label_smoothing=0.1)
+        ),
+    )
+
+    assert result.average_loss == pytest.approx(expected)
+
+
+def test_build_optimizer_applies_only_locked_weight_decay_difference() -> None:
+    e0_model = make_model()
+    e3_model = make_model()
+    e0_config = make_config().training
+    e3_config = replace(e0_config, weight_decay=0.001)
+
+    e0_optimizer = build_optimizer(e0_model, e0_config)
+    e3_optimizer = build_optimizer(e3_model, e3_config)
+
+    assert type(e0_optimizer) is torch.optim.AdamW
+    assert type(e3_optimizer) is torch.optim.AdamW
+    assert len(e0_optimizer.param_groups) == len(e3_optimizer.param_groups) == 1
+    e0_group = dict(e0_optimizer.param_groups[0])
+    e3_group = dict(e3_optimizer.param_groups[0])
+    assert e0_group.pop("weight_decay") == pytest.approx(0.0001)
+    assert e3_group.pop("weight_decay") == pytest.approx(0.001)
+    assert e0_group.pop("lr") == pytest.approx(0.0001)
+    assert e3_group.pop("lr") == pytest.approx(0.0001)
+    e0_group.pop("params")
+    e3_group.pop("params")
+    assert e0_group == e3_group
 
 
 def test_train_accuracy_uses_samples_not_unweighted_batch_means() -> None:
@@ -1119,6 +1171,100 @@ def test_synthetic_e2_training_records_augmentation_and_skips_private_test(
     assert history[0]["learning_rate"] == pytest.approx(0.0001)
     assert "train_accuracy" in history[0]
     assert best["epoch"] == 1
+
+
+def test_synthetic_e3_training_isolated_loss_and_optimizer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    csv_path = write_synthetic_training_csv(tmp_path)
+    output_directory = tmp_path / "e3-output"
+    original = make_config()
+    config = replace(
+        original,
+        dataset=replace(original.dataset, path=str(csv_path)),
+        model=replace(original.model, pretrained=False),
+        training=replace(
+            original.training,
+            epochs=1,
+            batch_size=2,
+            num_workers=0,
+            device="cpu",
+            weight_decay=0.001,
+            loss=LossConfig(label_smoothing=0.1),
+        ),
+        output=replace(original.output, directory=str(output_directory)),
+    )
+    monkeypatch.setattr(
+        "occlusion_fer.train.create_resnet18",
+        lambda **kwargs: make_spatial_model(),
+    )
+
+    training_losses: list[float] = []
+    evaluation_losses: list[float] = []
+    optimizer_groups: list[dict[str, object]] = []
+    original_training_builder = train_module.build_training_criterion
+    original_evaluation_builder = evaluation_module.build_evaluation_criterion
+    original_optimizer_builder = train_module.build_optimizer
+
+    def recording_training_builder(loss_config: LossConfig) -> nn.Module:
+        criterion = original_training_builder(loss_config)
+        training_losses.append(float(criterion.label_smoothing))
+        return criterion
+
+    def recording_evaluation_builder() -> nn.Module:
+        criterion = original_evaluation_builder()
+        evaluation_losses.append(float(criterion.label_smoothing))
+        return criterion
+
+    def recording_optimizer(model: nn.Module, training: object) -> torch.optim.Optimizer:
+        optimizer = original_optimizer_builder(model, training)
+        optimizer_groups.append(dict(optimizer.param_groups[0]))
+        return optimizer
+
+    monkeypatch.setattr(
+        train_module, "build_training_criterion", recording_training_builder
+    )
+    monkeypatch.setattr(
+        evaluation_module,
+        "build_evaluation_criterion",
+        recording_evaluation_builder,
+    )
+    monkeypatch.setattr(train_module, "build_optimizer", recording_optimizer)
+
+    run_training(config)
+
+    resolved = yaml.safe_load(
+        (output_directory / "resolved_config.yaml").read_text(encoding="utf-8")
+    )
+    history = json.loads(
+        (output_directory / "history.json").read_text(encoding="utf-8")
+    )
+    best = torch.load(
+        output_directory / "best.pt", map_location="cpu", weights_only=False
+    )
+    assert training_losses == [pytest.approx(0.1)]
+    assert evaluation_losses == [pytest.approx(0.0)]
+    assert optimizer_groups[0]["lr"] == pytest.approx(0.0001)
+    assert optimizer_groups[0]["weight_decay"] == pytest.approx(0.001)
+    assert resolved["dataset"]["augmentation"]["type"] == "none"
+    assert resolved["training"]["loss"]["type"] == "cross_entropy"
+    assert resolved["training"]["loss"]["label_smoothing"] == pytest.approx(0.1)
+    assert resolved["training"]["weight_decay"] == pytest.approx(0.001)
+    assert resolved["training"]["scheduler"]["type"] == "none"
+    assert len(history) == 1
+    assert history[0]["learning_rate"] == pytest.approx(0.0001)
+    assert np.isfinite(history[0]["validation_loss"])
+    assert {
+        "train_loss",
+        "train_accuracy",
+        "validation_loss",
+        "validation_accuracy",
+        "validation_macro_f1",
+        "learning_rate",
+    }.issubset(history[0])
+    assert best["epoch"] == 1
+    assert not (output_directory / "final_test").exists()
 
 
 def make_spatial_model() -> nn.Module:

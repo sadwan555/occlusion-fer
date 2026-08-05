@@ -354,6 +354,79 @@ PublicTest validation artifacts, with no `final_test` directory or PrivateTest
 counts/metrics. Compare raw `validation/best_metrics.json` values only after both
 runs finish. This screening stage does not run E3/E4 or any PrivateTest evaluation.
 
+## 8.2 E3 regularization screening
+
+E3 只改变训练正则化：训练使用
+`CrossEntropyLoss(label_smoothing=0.1)`，验证和最终评估继续使用普通
+`CrossEntropyLoss(label_smoothing=0.0)`；AdamW `weight_decay=1e-3`。E3 的
+augmentation 和 scheduler 均为 `none`，其余模型、输入、训练预算、seed 和
+PublicTest macro-F1 checkpoint 规则与 E0 相同。
+
+E3 的直接比较必须在同一 E3 commit 上先运行全新的 E0-control，再运行 E3。
+旧 E0 结果只用于 consistency reference，不作为正式配对对照。建议结果根目录：
+
+```text
+/home/ucla/anson-fer/results/screening-<E3_COMMIT_SHORT>/
+  e0_control/seed2026/
+  e3_regularization/seed2026/
+  logs/
+  preflight/
+```
+
+筛选前验证 E0/E3 配置哈希和 Git commit；两个 run 必须严格顺序执行。训练和
+preflight 只请求 Training 与 PublicTest，不调用 `final_evaluate`：
+
+```bash
+export FER_E3_SCREENING_ROOT="${FER_WORK_ROOT}/results/screening-<E3_COMMIT_SHORT>"
+export FER_E3_LOGS="${FER_E3_SCREENING_ROOT}/logs"
+export FER_E3_PREFLIGHT="${FER_E3_SCREENING_ROOT}/preflight"
+export FER_E3_CONTROL_RUN="${FER_E3_SCREENING_ROOT}/e0_control/seed2026"
+export FER_E3_RUN="${FER_E3_SCREENING_ROOT}/e3_regularization/seed2026"
+mkdir -p "${FER_E3_LOGS}" "${FER_E3_PREFLIGHT}"
+
+git status --short
+git rev-parse HEAD
+sha256sum configs/experiments/fer2013_resnet18_e0_baseline.yaml \
+  configs/experiments/fer2013_resnet18_e3_regularization.yaml
+```
+
+先完成 E0-control 的 preflight 和 seed-2026 training，检查产物完整且没有
+PrivateTest 统计；随后再运行 E3：
+
+```bash
+python -m occlusion_fer.preflight \
+  --config configs/experiments/fer2013_resnet18_e0_baseline.yaml \
+  --data-path "${FER_DATA_CSV}" \
+  --output-dir "${FER_E3_PREFLIGHT}/e0-control-seed2026" \
+  --device cuda --batch-size 128 \
+  2>&1 | tee "${FER_E3_LOGS}/e0-control-seed2026-preflight.log"
+
+python -m occlusion_fer.train \
+  --config configs/experiments/fer2013_resnet18_e0_baseline.yaml \
+  --data-path "${FER_DATA_CSV}" \
+  --output-dir "${FER_E3_CONTROL_RUN}" \
+  --seed 2026 --device cuda --batch-size 128 --num-workers 4 --amp \
+  2>&1 | tee "${FER_E3_LOGS}/e0-control-seed2026-train.log"
+
+python -m occlusion_fer.preflight \
+  --config configs/experiments/fer2013_resnet18_e3_regularization.yaml \
+  --data-path "${FER_DATA_CSV}" \
+  --output-dir "${FER_E3_PREFLIGHT}/e3-seed2026" \
+  --device cuda --batch-size 128 \
+  2>&1 | tee "${FER_E3_LOGS}/e3-seed2026-preflight.log"
+
+python -m occlusion_fer.train \
+  --config configs/experiments/fer2013_resnet18_e3_regularization.yaml \
+  --data-path "${FER_DATA_CSV}" \
+  --output-dir "${FER_E3_RUN}" \
+  --seed 2026 --device cuda --batch-size 128 --num-workers 4 --amp \
+  2>&1 | tee "${FER_E3_LOGS}/e3-seed2026-train.log"
+```
+
+筛选条件固定为：
+`E3_best_macro_f1 - E0_control_best_macro_f1 >= -0.0030`。不要调整 smoothing、
+weight decay、checkpoint 指标或运行额外 seed；本阶段不访问 PrivateTest，也不实现 E4。
+
 ## 9. 三种子正式 clean 训练
 
 开始前再次确认 Git 干净，并记录环境。不要使用 `max-*-samples`：

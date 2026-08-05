@@ -9,9 +9,9 @@ from dataclasses import dataclass
 
 import torch
 from torch import Tensor, nn
-from torch.nn import functional as F
 
 from occlusion_fer.data import FER2013_LABEL_NAMES
+from occlusion_fer.losses import build_evaluation_criterion
 from occlusion_fer.metrics import PerClassMetrics, compute_classification_metrics
 
 
@@ -60,6 +60,7 @@ def evaluate(
     """Evaluate without updates and retain paper-ready per-sample predictions."""
     _validate_evaluation_request(split, condition, amp_enabled, device)
     model.eval()
+    criterion = build_evaluation_criterion()
     total_loss = 0.0
     sample_count = 0
     true_labels: list[int] = []
@@ -77,7 +78,7 @@ def evaluate(
             with _autocast_context(amp_enabled):
                 logits = model(images)
                 _validate_logits(logits, batch_size)
-                loss = F.cross_entropy(logits, labels)
+                loss = criterion(logits, labels)
             loss_value = _validated_loss_value(loss)
             probabilities = torch.softmax(logits.detach().float(), dim=1).cpu()
             if not torch.isfinite(probabilities).all().item():
