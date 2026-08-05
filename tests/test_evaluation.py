@@ -1,9 +1,12 @@
+from pathlib import Path
+
 import numpy as np
 import pytest
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
+import occlusion_fer.evaluation as evaluation_module
 from occlusion_fer.evaluation import evaluate
 
 
@@ -15,6 +18,16 @@ class LookupModel(nn.Module):
     def forward(self, images: torch.Tensor) -> torch.Tensor:
         indices = images[:, 0, 0, 0].to(dtype=torch.long)
         return self.lookup_logits[indices]
+
+
+class RecordingLookupModel(LookupModel):
+    def __init__(self, logits: torch.Tensor) -> None:
+        super().__init__(logits)
+        self.received_images: list[torch.Tensor] = []
+
+    def forward(self, images: torch.Tensor) -> torch.Tensor:
+        self.received_images.append(images.detach().cpu().clone())
+        return super().forward(images)
 
 
 def make_loader(
@@ -86,6 +99,59 @@ def test_evaluate_metrics_match_prediction_records() -> None:
     assert result.confusion_matrix[2][2] == 1
     assert result.macro_f1 == pytest.approx((1.0 + 0.0 + 2.0 / 3.0) / 7.0)
     assert np.isfinite(result.average_loss)
+
+
+def test_original_evaluation_uses_clean_images_without_stage_a_dependencies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import occlusion_fer.mask_manifest as manifest_module
+    import occlusion_fer.occlusion as occlusion_module
+    import occlusion_fer.training_mean as training_mean_module
+
+    def forbidden_call(*args: object, **kwargs: object) -> None:
+        raise AssertionError("original evaluation must not use Stage A artifacts")
+
+    monkeypatch.setattr(
+        occlusion_module,
+        "apply_evaluation_batch",
+        forbidden_call,
+    )
+    monkeypatch.setattr(
+        training_mean_module,
+        "load_training_mean_artifact",
+        forbidden_call,
+    )
+    monkeypatch.setattr(
+        manifest_module,
+        "generate_manifest_rows",
+        forbidden_call,
+    )
+    source = make_loader()
+    expected_images = torch.cat([batch[0] for batch in source])
+    model = RecordingLookupModel(make_model().lookup_logits.clone())
+
+    result = evaluate(
+        model,
+        make_loader(),
+        torch.device("cpu"),
+        split="validation",
+        condition="original",
+    )
+
+    assert isinstance(result, evaluation_module.EvaluationResult)
+    assert result.sample_count == 3
+    assert tuple(record.condition for record in result.predictions) == (
+        "original",
+        "original",
+        "original",
+    )
+    assert torch.equal(torch.cat(model.received_images), expected_images)
+    assert not list(tmp_path.iterdir())
+    source_text = Path(evaluation_module.__file__).read_text(encoding="utf-8")
+    assert "occlusion_fer.occlusion" not in source_text
+    assert "training_mean" not in source_text
+    assert "mask_manifest" not in source_text
 
 
 def test_evaluate_rejects_duplicate_sample_ids() -> None:
