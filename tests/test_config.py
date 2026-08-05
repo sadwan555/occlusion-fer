@@ -70,6 +70,12 @@ def write_occlusion_config(
         encoding="utf-8",
     )
     return config_path
+def add_training_settings(content: str, settings: str) -> str:
+    return content.replace(
+        "  device: auto\n",
+        f"  device: auto\n{settings}",
+        1,
+    )
 
 
 def test_loads_valid_configuration(tmp_path: Path) -> None:
@@ -90,7 +96,146 @@ def test_loads_valid_configuration(tmp_path: Path) -> None:
     assert config.training.weight_decay == pytest.approx(0.0001)
     assert config.training.num_workers == 0
     assert config.training.device == "auto"
+    assert config.training.scheduler.type == "none"
+    assert config.training.scheduler.warmup_epochs == 0
+    assert config.training.early_stopping.enabled is False
     assert config.output.directory == "outputs/smoke"
+
+
+def test_loads_explicit_none_scheduler_without_changing_base_lr(
+    tmp_path: Path,
+) -> None:
+    content = add_training_settings(
+        VALID_CONFIG,
+        """\
+  scheduler:
+    type: none
+    warmup_epochs: 0
+    warmup_start_factor: 1.0
+    min_learning_rate: 0.0001
+  early_stopping:
+    enabled: false
+    patience: 0
+""",
+    )
+
+    config = load_config(write_config(tmp_path, content))
+
+    assert config.training.scheduler.type == "none"
+    assert config.training.scheduler.min_learning_rate == pytest.approx(0.0001)
+    assert config.training.learning_rate == pytest.approx(0.0001)
+    assert config.training.early_stopping.enabled is False
+    assert config.training.early_stopping.patience == 0
+
+
+def test_loads_warmup_cosine_scheduler_and_early_stopping(tmp_path: Path) -> None:
+    content = add_training_settings(
+        VALID_CONFIG.replace(
+            "  name: occlusion-fer\n",
+            "  name: occlusion-fer\n  experiment_name: e1_warmup_cosine\n",
+            1,
+        ).replace("epochs: 1", "epochs: 30"),
+        """\
+  scheduler:
+    type: warmup_cosine
+    warmup_epochs: 3
+    warmup_start_factor: 0.1
+    min_learning_rate: 0.000001
+  early_stopping:
+    enabled: true
+    patience: 8
+""",
+    )
+
+    config = load_config(write_config(tmp_path, content))
+
+    assert config.project.experiment_name == "e1_warmup_cosine"
+    assert config.training.scheduler.type == "warmup_cosine"
+    assert config.training.scheduler.warmup_epochs == 3
+    assert config.training.scheduler.warmup_start_factor == pytest.approx(0.1)
+    assert config.training.scheduler.min_learning_rate == pytest.approx(0.000001)
+    assert config.training.early_stopping.enabled is True
+    assert config.training.early_stopping.patience == 8
+
+
+def test_rejects_unknown_scheduler_type(tmp_path: Path) -> None:
+    content = add_training_settings(
+        VALID_CONFIG,
+        """\
+  scheduler:
+    type: one_cycle
+""",
+    )
+
+    with pytest.raises(ConfigError, match=r"training\.scheduler\.type.*none.*warmup_cosine"):
+        load_config(write_config(tmp_path, content))
+
+
+@pytest.mark.parametrize("warmup_epochs", [-1, 30, 31])
+def test_rejects_warmup_epochs_outside_epoch_budget(
+    tmp_path: Path, warmup_epochs: int
+) -> None:
+    content = add_training_settings(
+        VALID_CONFIG.replace("epochs: 1", "epochs: 30"),
+        f"""\
+  scheduler:
+    type: warmup_cosine
+    warmup_epochs: {warmup_epochs}
+""",
+    )
+
+    with pytest.raises(ConfigError, match=r"training\.scheduler\.warmup_epochs.*epochs"):
+        load_config(write_config(tmp_path, content))
+
+
+@pytest.mark.parametrize("start_factor", [0, -0.1, 1.1])
+def test_rejects_invalid_warmup_start_factor(
+    tmp_path: Path, start_factor: float
+) -> None:
+    content = add_training_settings(
+        VALID_CONFIG,
+        f"""\
+  scheduler:
+    type: none
+    warmup_start_factor: {start_factor}
+""",
+    )
+
+    with pytest.raises(ConfigError, match=r"training\.scheduler\.warmup_start_factor"):
+        load_config(write_config(tmp_path, content))
+
+
+def test_rejects_min_learning_rate_above_base_learning_rate(
+    tmp_path: Path,
+) -> None:
+    content = add_training_settings(
+        VALID_CONFIG,
+        """\
+  scheduler:
+    type: warmup_cosine
+    min_learning_rate: 0.0002
+""",
+    )
+
+    with pytest.raises(ConfigError, match=r"training\.scheduler\.min_learning_rate"):
+        load_config(write_config(tmp_path, content))
+
+
+@pytest.mark.parametrize("patience", [0, -1])
+def test_rejects_invalid_enabled_early_stopping_patience(
+    tmp_path: Path, patience: int
+) -> None:
+    content = add_training_settings(
+        VALID_CONFIG,
+        f"""\
+  early_stopping:
+    enabled: true
+    patience: {patience}
+""",
+    )
+
+    with pytest.raises(ConfigError, match=r"training\.early_stopping\.patience"):
+        load_config(write_config(tmp_path, content))
 
 
 def test_repository_smoke_configuration_is_valid() -> None:
@@ -102,6 +247,34 @@ def test_repository_smoke_configuration_is_valid() -> None:
 
     assert config.model.name == "resnet18"
     assert config.output.directory == "outputs/smoke"
+
+
+def test_repository_e0_e1_configs_differ_only_in_locked_fields() -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    config_root = repository_root / "configs" / "experiments"
+
+    e0 = load_config(config_root / "fer2013_resnet18_e0_baseline.yaml")
+    e1 = load_config(
+        config_root / "fer2013_resnet18_e1_warmup_cosine.yaml"
+    )
+
+    assert e0.project.experiment_name == "e0_baseline"
+    assert e1.project.experiment_name == "e1_warmup_cosine"
+    assert e0.training.scheduler.type == "none"
+    assert e1.training.scheduler.type == "warmup_cosine"
+    assert e1.training.scheduler.warmup_epochs == 3
+    assert e1.training.scheduler.warmup_start_factor == pytest.approx(0.1)
+    assert e1.training.scheduler.min_learning_rate == pytest.approx(1e-6)
+    assert e0.training.early_stopping.enabled is False
+    assert e1.training.early_stopping.enabled is False
+
+    e0_values = asdict(e0)
+    e1_values = asdict(e1)
+    for values in (e0_values, e1_values):
+        values["project"].pop("experiment_name")
+        values["training"].pop("scheduler")
+        values["output"].pop("directory")
+    assert e0_values == e1_values
 
 
 def test_rejects_empty_project_name(tmp_path: Path) -> None:

@@ -19,7 +19,7 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 from torch.utils.data import Dataset, Subset
 
-from occlusion_fer.config import AppConfig, load_config
+from occlusion_fer.config import AppConfig, EarlyStoppingConfig, load_config
 from occlusion_fer.data import load_fer2013_csv
 from occlusion_fer.evaluation import EvaluationResult, evaluate
 from occlusion_fer.artifacts import (
@@ -32,6 +32,7 @@ from occlusion_fer.artifacts import (
     write_resolved_config,
 )
 from occlusion_fer.models import create_resnet18
+from occlusion_fer.schedulers import EpochLearningRateScheduler
 from occlusion_fer.torch_data import Fer2013TorchDataset, create_dataloader
 
 
@@ -41,7 +42,27 @@ Batch = tuple[Tensor, Tensor, Tensor]
 @dataclass(frozen=True)
 class TrainingResult:
     average_loss: float
+    accuracy: float
     sample_count: int
+
+
+@dataclass
+class EarlyStopping:
+    """Count consecutive epochs without strict macro-F1 improvement."""
+
+    config: EarlyStoppingConfig
+    epochs_without_improvement: int = 0
+
+    def update(self, *, improved: bool) -> bool:
+        if type(improved) is not bool:
+            raise ValueError("improved must be a bool")
+        if not self.config.enabled:
+            return False
+        if improved:
+            self.epochs_without_improvement = 0
+        else:
+            self.epochs_without_improvement += 1
+        return self.epochs_without_improvement >= self.config.patience
 
 
 def is_better_validation_macro_f1(candidate: float, best: float) -> bool:
@@ -116,6 +137,7 @@ def train_one_epoch(
         raise ValueError("AMP training requires a GradScaler")
     model.train()
     total_loss = 0.0
+    correct_predictions = 0
     sample_count = 0
     non_blocking = device.type == "cuda"
 
@@ -130,6 +152,9 @@ def train_one_epoch(
             _validate_logits(logits, batch_size)
             loss = F.cross_entropy(logits, labels)
         loss_value = _validated_loss_value(loss)
+        correct_predictions += int(
+            (logits.detach().argmax(dim=1) == labels).sum().item()
+        )
         if scaler is None:
             loss.backward()
             optimizer.step()
@@ -145,6 +170,7 @@ def train_one_epoch(
         raise ValueError("training loader has no samples")
     return TrainingResult(
         average_loss=total_loss / sample_count,
+        accuracy=correct_predictions / sample_count,
         sample_count=sample_count,
     )
 
@@ -216,6 +242,12 @@ def apply_config_overrides(
             )
         training = replace(training, num_workers=num_workers)
 
+    if not 0 <= training.scheduler.warmup_epochs < training.epochs:
+        raise ValueError(
+            "scheduler warmup_epochs must satisfy "
+            "0 <= warmup_epochs < epochs after overrides"
+        )
+
     return replace(
         config,
         dataset=dataset,
@@ -263,6 +295,7 @@ def save_checkpoint(
     resolved_config: Mapping[str, object],
     checkpoint_name: str = "best.pt",
     scaler: torch.amp.GradScaler | None = None,
+    scheduler: EpochLearningRateScheduler | None = None,
 ) -> Path:
     """Save a reloadable best or last training checkpoint."""
     if checkpoint_name not in {"best.pt", "last.pt"}:
@@ -289,6 +322,8 @@ def save_checkpoint(
     }
     if scaler is not None:
         payload["grad_scaler_state_dict"] = scaler.state_dict()
+    if scheduler is not None:
+        payload["scheduler_state_dict"] = scheduler.state_dict()
     try:
         torch.save(payload, checkpoint_path)
     except Exception as exc:
@@ -453,9 +488,20 @@ def _run_training(
         lr=config.training.learning_rate,
         weight_decay=config.training.weight_decay,
     )
+    scheduler = (
+        None
+        if config.training.scheduler.type == "none"
+        else EpochLearningRateScheduler(
+            optimizer,
+            config.training.scheduler,
+            base_learning_rate=config.training.learning_rate,
+            total_epochs=config.training.epochs,
+        )
+    )
     scaler = (
         torch.amp.GradScaler("cuda", enabled=True) if amp_enabled else None
     )
+    early_stopping = EarlyStopping(config.training.early_stopping)
 
     best_validation_macro_f1 = -1.0
     history: list[dict[str, object]] = []
@@ -466,6 +512,13 @@ def _run_training(
     last_checkpoint: Path | None = None
 
     for epoch in range(1, config.training.epochs + 1):
+        if scheduler is not None:
+            learning_rates = scheduler.set_epoch(epoch)
+        else:
+            learning_rates = tuple(
+                float(group["lr"]) for group in optimizer.param_groups
+            )
+        learning_rate = learning_rates[0]
         _reset_peak_memory(device)
         _synchronize_device(device)
         epoch_started = time.perf_counter()
@@ -507,6 +560,9 @@ def _run_training(
             validation_result.macro_f1,
             best_validation_macro_f1,
         )
+        should_stop_early = early_stopping.update(
+            improved=updated_best_checkpoint
+        )
         saved_checkpoint: Path | None = None
         if updated_best_checkpoint:
             best_validation_macro_f1 = validation_result.macro_f1
@@ -528,6 +584,7 @@ def _run_training(
                 resolved_config=resolved_config,
                 checkpoint_name="best.pt",
                 scaler=scaler,
+                scheduler=scheduler,
             )
 
         last_checkpoint = save_checkpoint(
@@ -543,12 +600,15 @@ def _run_training(
             resolved_config=resolved_config,
             checkpoint_name="last.pt",
             scaler=scaler,
+            scheduler=scheduler,
         )
         history.append(
             {
                 "epoch": epoch,
                 "train_samples": training_result.sample_count,
                 "train_loss": training_result.average_loss,
+                "train_accuracy": training_result.accuracy,
+                "learning_rate": learning_rate,
                 "validation_samples": validation_result.sample_count,
                 "validation_loss": validation_result.average_loss,
                 "validation_accuracy": validation_result.accuracy,
@@ -568,6 +628,8 @@ def _run_training(
         print(f"Epoch {epoch}/{config.training.epochs}")
         print(f"train_samples={training_result.sample_count}")
         print(f"train_loss={training_result.average_loss:.4f}")
+        print(f"train_accuracy={training_result.accuracy:.4f}")
+        print(f"learning_rate={learning_rate:.12g}")
         print(f"validation_samples={validation_result.sample_count}")
         print(f"validation_loss={validation_result.average_loss:.4f}")
         print(f"validation_accuracy={validation_result.accuracy:.4f}")
@@ -586,6 +648,12 @@ def _run_training(
             print(f"saved_best_checkpoint={saved_checkpoint}")
         print(f"saved_last_checkpoint={last_checkpoint}")
         print(f"saved_history={history_json_path}")
+        if should_stop_early:
+            print(
+                "early_stopping_triggered=True "
+                f"patience={config.training.early_stopping.patience}"
+            )
+            break
 
     if history_json_path is None or history_csv_path is None:
         raise RuntimeError("training completed without history artifacts")

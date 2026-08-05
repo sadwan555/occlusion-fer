@@ -130,8 +130,9 @@ CSV 必须包含 `emotion,pixels,Usage`，并保留三个官方 split 名称。
 
 ## 6. Preflight
 
-preflight 检查环境、完整 CSV、split、batch、随机初始化模型 forward 和输出目录；
-不会训练、下载预训练权重或保存 checkpoint。
+preflight 检查环境、CSV schema、Training/PublicTest、batch、随机初始化模型
+forward 和输出目录；它在 CSV 读取阶段跳过 PrivateTest 行，不解析其标签、像素、
+数量或类别统计，也不会训练、下载预训练权重或保存 checkpoint。
 
 ```bash
 cd "${FER_PROJECT_ROOT}"
@@ -145,8 +146,9 @@ python -m occlusion_fer.preflight \
   2>&1 | tee "${FER_OUTPUT_ROOT}/preflight.log"
 ```
 
-只有末尾出现 `PREFLIGHT PASSED` 才继续。应同时确认 Training、PublicTest、
-PrivateTest 数量合理，batch 为 `[N,3,112,112]`，logits 为 `[N,7]`。
+只有末尾出现 `PREFLIGHT PASSED` 才继续。应确认 Training、PublicTest 数量合理，
+输出中没有 `test_samples` 或 `test_class_counts`，batch 为 `[N,3,112,112]`，
+logits 为 `[N,7]`。PrivateTest 只允许由锁定后的 `final_evaluate` 入口显式请求。
 
 ## 7. 性能 smoke test
 
@@ -175,7 +177,119 @@ python -m occlusion_fer.train \
 这必须显示 `SMOKE TEST — NOT A FORMAL EXPERIMENT`。确认 loss 有限、吞吐合理、
 产生 best/last checkpoint 和 validation artifacts。smoke 数值不能写入正式结果。
 
-## 8. 三种子正式 clean 训练
+## 8. E0/E1 seed 2026 筛选
+
+第一轮只比较 E0 原始配方与 E1 warmup/cosine。两者都按 PublicTest
+macro-F1 保存 `best.pt`，early stopping 均关闭；不要运行 `final_evaluate`，也不要
+把筛选阶段的 seed 2026 结果混入后续三 seed 正式汇总。
+
+准备独立目录变量。preflight、run 和日志使用不同路径；训练 run 目录在命令执行前
+必须不存在：
+
+```bash
+export FER_DATA_CSV="/home/ucla/anson-fer/data/raw/fer2013.csv"
+export FER_SCREENING_ROOT="/home/ucla/anson-fer/results/screening"
+export FER_SCREENING_LOGS="${FER_SCREENING_ROOT}/logs"
+export FER_E0_PREFLIGHT="${FER_SCREENING_ROOT}/preflight/e0_baseline-seed2026"
+export FER_E1_PREFLIGHT="${FER_SCREENING_ROOT}/preflight/e1_warmup_cosine-seed2026"
+export FER_E0_RUN="${FER_SCREENING_ROOT}/e0_baseline/seed2026"
+export FER_E1_RUN="${FER_SCREENING_ROOT}/e1_warmup_cosine/seed2026"
+mkdir -p "${FER_SCREENING_LOGS}"
+set -o pipefail
+```
+
+真实筛选必须从包含 PrivateTest 隔离修正的单一、干净 commit 启动，并固定两份配置
+文件的内容哈希。以下 gate 有任何一步失败都不要继续：
+
+```bash
+if [ -n "$(git status --porcelain)" ]; then
+  echo "Refusing screening run: Git worktree is dirty" >&2
+  exit 1
+fi
+git rev-parse HEAD | tee "${FER_SCREENING_LOGS}/experiment-commit.txt"
+sha256sum \
+  configs/experiments/fer2013_resnet18_e0_baseline.yaml \
+  configs/experiments/fer2013_resnet18_e1_warmup_cosine.yaml \
+  | tee "${FER_SCREENING_LOGS}/experiment-config-sha256.txt"
+```
+
+E0 preflight：
+
+```bash
+python -m occlusion_fer.preflight \
+  --config configs/experiments/fer2013_resnet18_e0_baseline.yaml \
+  --data-path "${FER_DATA_CSV}" \
+  --output-dir "${FER_E0_PREFLIGHT}" \
+  --device cuda \
+  --batch-size 128 \
+  2>&1 | tee "${FER_SCREENING_LOGS}/e0-seed2026-preflight.log"
+```
+
+E0 training：
+
+```bash
+python -m occlusion_fer.train \
+  --config configs/experiments/fer2013_resnet18_e0_baseline.yaml \
+  --data-path "${FER_DATA_CSV}" \
+  --output-dir "${FER_E0_RUN}" \
+  --seed 2026 \
+  --device cuda \
+  --batch-size 128 \
+  --num-workers 4 \
+  --amp \
+  2>&1 | tee "${FER_SCREENING_LOGS}/e0-seed2026-train.log"
+```
+
+E1 preflight：
+
+```bash
+python -m occlusion_fer.preflight \
+  --config configs/experiments/fer2013_resnet18_e1_warmup_cosine.yaml \
+  --data-path "${FER_DATA_CSV}" \
+  --output-dir "${FER_E1_PREFLIGHT}" \
+  --device cuda \
+  --batch-size 128 \
+  2>&1 | tee "${FER_SCREENING_LOGS}/e1-seed2026-preflight.log"
+```
+
+E1 training：
+
+```bash
+python -m occlusion_fer.train \
+  --config configs/experiments/fer2013_resnet18_e1_warmup_cosine.yaml \
+  --data-path "${FER_DATA_CSV}" \
+  --output-dir "${FER_E1_RUN}" \
+  --seed 2026 \
+  --device cuda \
+  --batch-size 128 \
+  --num-workers 4 \
+  --amp \
+  2>&1 | tee "${FER_SCREENING_LOGS}/e1-seed2026-train.log"
+```
+
+查看日志和 GPU 进程：
+
+```bash
+tail -n 60 "${FER_SCREENING_LOGS}/e0-seed2026-train.log"
+tail -n 60 "${FER_SCREENING_LOGS}/e1-seed2026-train.log"
+nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv
+```
+
+验证 resolved config；输出必须分别显示 `none` 与 `warmup_cosine`，且两者
+`early_stopping.enabled` 都是 `false`：
+
+```bash
+python -c 'import pathlib,yaml; paths=[pathlib.Path(p) for p in ("/home/ucla/anson-fer/results/screening/e0_baseline/seed2026/resolved_config.yaml","/home/ucla/anson-fer/results/screening/e1_warmup_cosine/seed2026/resolved_config.yaml")]; [print(p, yaml.safe_load(p.read_text())["training"]) for p in paths]'
+```
+
+比较 PublicTest best 指标。筛选容差固定为
+`E1 macro_f1 >= E0 macro_f1 - 0.0030`，使用原始 JSON 浮点值计算：
+
+```bash
+python -c 'import json,pathlib; root=pathlib.Path("/home/ucla/anson-fer/results/screening"); e0=json.loads((root/"e0_baseline/seed2026/validation/best_metrics.json").read_text()); e1=json.loads((root/"e1_warmup_cosine/seed2026/validation/best_metrics.json").read_text()); print("E0", e0["accuracy"], e0["macro_f1"]); print("E1", e1["accuracy"], e1["macro_f1"]); print("macro_f1_delta", e1["macro_f1"]-e0["macro_f1"]); print("passes_tolerance", e1["macro_f1"] >= e0["macro_f1"]-0.0030)'
+```
+
+## 9. 三种子正式 clean 训练
 
 开始前再次确认 Git 干净，并记录环境。不要使用 `max-*-samples`：
 
@@ -231,7 +345,7 @@ validation/last_predictions.csv
 加载。检查三个 `run_metadata.json` 的 `status` 均为 `completed`、Git commit
 相同、`git_dirty` 为 `false`、seed 分别正确。
 
-## 9. 锁定后的 PrivateTest 最终评估
+## 10. 锁定后的 PrivateTest 最终评估
 
 本节命令已准备好，但当前 clean 开发阶段不要立即执行。只有在以下条件全部满足
 后才执行：clean 和 mixed 的六个正式 run 均完成；模型、超参数、九个遮挡条件、
@@ -265,7 +379,7 @@ final_test/clean_confusion_matrix.csv
 final_test/clean_predictions.csv
 ```
 
-## 10. 指标定义与论文产物映射
+## 11. 指标定义与论文产物映射
 
 类别顺序始终为 `angry, disgust, fear, happy, sad, surprise, neutral`。混淆矩阵
 的行是真实标签，列是预测标签。macro-F1 对全部七类的 F1 做等权平均；零分母
@@ -289,7 +403,7 @@ final_test/clean_predictions.csv
 脚本，后续应在遮挡实验设计锁定后统一实现，以确保 clean/occluded 使用同一
 统计口径和图形模板。
 
-## 11. 失败处理与常见问题
+## 12. 失败处理与常见问题
 
 - `CUDA was requested but is not available`：确认会话仍有 GPU、`nvidia-smi` 和
   CUDA PyTorch 均正常。
@@ -306,7 +420,7 @@ final_test/clean_predictions.csv
 - final results already exist：不覆盖。核对该 run 是否已完成最终评估；若是，
   使用原结果；若实验协议确需重做，必须先记录原因并使用全新 run 目录。
 
-## 12. Git 与安全检查
+## 13. Git 与安全检查
 
 数据、图片、checkpoint、outputs、logs、runs、虚拟环境、cache、`.env`、
 `kaggle.json`、token 和 SSH 私钥都不能进入 Git。正式运行前后检查：

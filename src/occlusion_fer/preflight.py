@@ -17,7 +17,12 @@ import torchvision
 from torch import Tensor
 
 from occlusion_fer.config import AppConfig, load_config
-from occlusion_fer.data import FER2013_LABEL_NAMES, Fer2013Data, load_fer2013_csv
+from occlusion_fer.data import (
+    FER2013_LABEL_NAMES,
+    Fer2013Data,
+    Fer2013Split,
+    load_fer2013_csv,
+)
 from occlusion_fer.models import create_resnet18
 from occlusion_fer.torch_data import Fer2013TorchDataset, create_dataloader
 from occlusion_fer.train import (
@@ -28,6 +33,7 @@ from occlusion_fer.train import (
 
 
 PLACEHOLDER_DATA_PATH = "/path/to/fer2013.csv"
+PREFLIGHT_SPLITS: tuple[Fer2013Split, ...] = ("train", "validation")
 Batch = tuple[Tensor, Tensor, Tensor]
 
 
@@ -139,13 +145,14 @@ def validate_data_path(path: str | Path) -> Path:
 
 
 def count_split_labels(data: Fer2013Data) -> dict[str, dict[int, int]]:
-    """Count all seven FER2013 labels separately for every official split."""
+    """Count labels only for the splits allowed during training preflight."""
     counts = {
         split: {label: 0 for label in range(len(FER2013_LABEL_NAMES))}
-        for split in ("train", "validation", "test")
+        for split in PREFLIGHT_SPLITS
     }
     for record in data.records:
-        counts[record.split][record.label] += 1
+        if record.split in counts:
+            counts[record.split][record.label] += 1
     return counts
 
 
@@ -341,9 +348,8 @@ def _print_data_summary(
     print(f"total_samples={len(data.records)}")
     print(f"train_samples={data.train_count}")
     print(f"validation_samples={data.validation_count}")
-    print(f"test_samples={data.test_count}")
     warnings: list[str] = []
-    for split in ("train", "validation", "test"):
+    for split in PREFLIGHT_SPLITS:
         formatted_counts = ", ".join(
             f"{label}:{FER2013_LABEL_NAMES[label]}={split_counts[split][label]}"
             for label in range(len(FER2013_LABEL_NAMES))
@@ -406,7 +412,10 @@ def run_preflight(args: argparse.Namespace) -> PreflightResult:
         print(f"data_path={data_path.resolve()}")
 
         stage = "data parsing"
-        data = load_fer2013_csv(data_path)
+        data = load_fer2013_csv(
+            data_path,
+            include_splits=PREFLIGHT_SPLITS,
+        )
         _validate_loaded_records(data)
         split_counts = count_split_labels(data)
         warnings = _print_data_summary(data, split_counts)
