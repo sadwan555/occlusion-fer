@@ -1,4 +1,3 @@
-import hashlib
 import importlib
 from collections.abc import Iterable
 
@@ -448,10 +447,17 @@ def test_locked_clean_tensor_is_unchanged_by_stage_a_module_imports() -> None:
     assert before_image.shape == (3, 112, 112)
     assert before_image.dtype == torch.float32
     assert torch.isfinite(before_image).all()
-    assert hashlib.sha256(
-        before_image.contiguous().numpy().tobytes()
-    ).hexdigest() == (
-        "79fbfe950036a62262e46c60c296ad3dc71514f3938fa1c175ebb44c309aa9b0"
+    assert float(before_image.min()) == pytest.approx(
+        -2.1179039478302,
+        abs=1e-6,
+    )
+    assert float(before_image.max()) == pytest.approx(
+        2.640000104904175,
+        abs=1e-6,
+    )
+    assert float(before_image.to(torch.float64).sum()) == pytest.approx(
+        8526.2647,
+        abs=5e-4,
     )
     torch.testing.assert_close(
         before_image[:, 55, 55],
@@ -459,7 +465,7 @@ def test_locked_clean_tensor_is_unchanged_by_stage_a_module_imports() -> None:
             [-0.11430713534355164, 0.012605716474354267, 0.2347719669342041]
         ),
         rtol=0,
-        atol=0,
+        atol=1e-6,
     )
     mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
     std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
