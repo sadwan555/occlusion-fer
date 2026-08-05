@@ -224,7 +224,7 @@ def test_unreadable_data_file_is_rejected(
         preflight.validate_data_path(csv_path)
 
 
-def test_full_data_counts_and_class_names_are_reported(
+def test_training_preflight_counts_and_class_names_are_reported(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     args = parse_args(
@@ -238,12 +238,45 @@ def test_full_data_counts_and_class_names_are_reported(
 
     output = capsys.readouterr().out
     assert result.success is True
-    assert "total_samples=14" in output
+    assert "total_samples=12" in output
     assert "train_samples=8" in output
     assert "validation_samples=4" in output
-    assert "test_samples=2" in output
+    assert "test_samples=" not in output
     assert "0:angry=2" in output
     assert "6:neutral=1" in output
+
+
+def test_preflight_does_not_parse_or_report_private_test(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    csv_path = write_csv(tmp_path)
+    rows = []
+    with csv_path.open("r", encoding="utf-8", newline="") as csv_file:
+        rows = list(csv.DictReader(csv_file))
+    for row in rows:
+        if row["Usage"] == "PrivateTest":
+            row["emotion"] = "not parsed"
+            row["pixels"] = "not parsed"
+    with csv_path.open("w", encoding="utf-8", newline="") as csv_file:
+        writer = csv.DictWriter(
+            csv_file, fieldnames=["emotion", "pixels", "Usage"]
+        )
+        writer.writeheader()
+        writer.writerows(rows)
+
+    args = parse_args(
+        write_config(tmp_path, data_path=str(csv_path)),
+        "--device",
+        "cpu",
+        "--skip-model-forward",
+    )
+
+    result = preflight.run_preflight(args)
+
+    output = capsys.readouterr().out
+    assert result.success is True
+    assert "test_samples=" not in output
+    assert "test_class_counts=" not in output
 
 
 def test_missing_classes_are_warnings_not_failures(
@@ -266,11 +299,11 @@ def test_missing_classes_are_warnings_not_failures(
 
     output = capsys.readouterr().out
     assert result.success is True
-    assert len(result.warnings) == 3
+    assert len(result.warnings) == 2
     assert "WARNINGS" in output
     assert "train split missing classes" in output
     assert "validation split missing classes" in output
-    assert "test split missing classes" in output
+    assert "test split missing classes" not in output
 
 
 def test_sample_limits_only_change_loader_counts(
@@ -291,7 +324,7 @@ def test_sample_limits_only_change_loader_counts(
 
     output = capsys.readouterr().out
     assert result.success is True
-    assert "total_samples=14" in output
+    assert "total_samples=12" in output
     assert "train_samples=8" in output
     assert "PREFLIGHT SAMPLE LIMIT — NOT A FORMAL EXPERIMENT" in output
     assert "actual_train_samples=3" in output

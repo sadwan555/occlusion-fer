@@ -16,15 +16,19 @@ import occlusion_fer.train as train_module
 from occlusion_fer.config import (
     AppConfig,
     DatasetConfig,
+    EarlyStoppingConfig,
     ModelConfig,
     OutputConfig,
     ProjectConfig,
+    SchedulerConfig,
     TrainingConfig,
 )
 from occlusion_fer.data import Fer2013Data, Fer2013Record
 from occlusion_fer.models import create_resnet18
+from occlusion_fer.schedulers import EpochLearningRateScheduler
 from occlusion_fer.torch_data import Fer2013TorchDataset, create_dataloader
 from occlusion_fer.train import (
+    EarlyStopping,
     apply_config_overrides,
     evaluate,
     is_better_validation_macro_f1,
@@ -176,12 +180,15 @@ def test_train_one_epoch_returns_weighted_loss_and_sample_count() -> None:
     images = torch.cat([batch[0] for batch in loader])
     labels = torch.cat([batch[1] for batch in loader])
     with torch.no_grad():
-        expected_loss = F.cross_entropy(model(images), labels).item()
+        logits = model(images)
+        expected_loss = F.cross_entropy(logits, labels).item()
+        expected_accuracy = (logits.argmax(dim=1) == labels).float().mean().item()
 
     result = train_one_epoch(model, loader, optimizer, torch.device("cpu"))
 
     assert result.sample_count == 5
     assert result.average_loss == pytest.approx(expected_loss)
+    assert result.accuracy == pytest.approx(expected_accuracy)
     assert np.isfinite(result.average_loss)
 
 
@@ -202,6 +209,45 @@ def test_train_one_epoch_remains_clean_without_epoch_or_occlusion_inputs() -> No
     assert "mask" not in source
     assert "manifest" not in source
     assert "training_mean" not in source
+def test_train_accuracy_uses_samples_not_unweighted_batch_means() -> None:
+    class IndexedLogits(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.logits = nn.Parameter(
+                torch.tensor(
+                    [
+                        [9.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                        [0.0, 0.0, 9.0, 0.0, 0.0, 0.0, 0.0],
+                        [0.0, 0.0, 9.0, 0.0, 0.0, 0.0, 0.0],
+                        [0.0, 0.0, 0.0, 0.0, 9.0, 0.0, 0.0],
+                        [0.0, 0.0, 0.0, 0.0, 9.0, 0.0, 0.0],
+                    ]
+                )
+            )
+
+        def forward(self, images: torch.Tensor) -> torch.Tensor:
+            indices = images[:, 0, 0, 0].to(dtype=torch.long)
+            return self.logits[indices]
+
+    images = torch.zeros(5, 3, 2, 2)
+    images[:, 0, 0, 0] = torch.arange(5)
+    labels = torch.tensor([0, 1, 2, 3, 4])
+    sample_ids = torch.arange(5)
+    loader = DataLoader(
+        TensorDataset(images, labels, sample_ids),
+        batch_size=2,
+        shuffle=False,
+    )
+    model = IndexedLogits()
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.0)
+    with torch.no_grad():
+        expected_loss = F.cross_entropy(model(images), labels).item()
+
+    result = train_one_epoch(model, loader, optimizer, torch.device("cpu"))
+
+    assert result.sample_count == 5
+    assert result.accuracy == pytest.approx(3.0 / 5.0)
+    assert result.average_loss == pytest.approx(expected_loss)
 
 
 def test_train_one_epoch_optimizer_step_changes_parameters() -> None:
@@ -445,6 +491,113 @@ def test_save_checkpoint_supports_last_file_and_grad_scaler_state(
     assert loaded["grad_scaler_state_dict"] == scaler.state_dict()
 
 
+def test_save_checkpoint_includes_scheduler_state_when_enabled(
+    tmp_path: Path,
+) -> None:
+    model = make_model()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.0001)
+    scheduler = EpochLearningRateScheduler(
+        optimizer,
+        SchedulerConfig(
+            type="warmup_cosine",
+            warmup_epochs=3,
+            warmup_start_factor=0.1,
+            min_learning_rate=0.000001,
+        ),
+        base_learning_rate=0.0001,
+        total_epochs=30,
+    )
+    scheduler.set_epoch(1)
+
+    checkpoint_path = save_checkpoint(
+        output_directory=tmp_path,
+        model=model,
+        optimizer=optimizer,
+        epoch=1,
+        best_validation_macro_f1=0.5,
+        validation_accuracy=0.6,
+        validation_macro_f1=0.5,
+        seed=42,
+        device=torch.device("cpu"),
+        resolved_config=asdict(make_config()),
+        scheduler=scheduler,
+    )
+    loaded = torch.load(
+        checkpoint_path, map_location="cpu", weights_only=False
+    )
+
+    assert loaded["scheduler_state_dict"] == scheduler.state_dict()
+
+
+def test_save_checkpoint_without_scheduler_keeps_legacy_payload(
+    tmp_path: Path,
+) -> None:
+    model = make_model()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.0001)
+
+    checkpoint_path = save_checkpoint(
+        output_directory=tmp_path,
+        model=model,
+        optimizer=optimizer,
+        epoch=1,
+        best_validation_macro_f1=0.5,
+        validation_accuracy=0.6,
+        validation_macro_f1=0.5,
+        seed=42,
+        device=torch.device("cpu"),
+        resolved_config=asdict(make_config()),
+    )
+    loaded = torch.load(
+        checkpoint_path, map_location="cpu", weights_only=False
+    )
+
+    assert "scheduler_state_dict" not in loaded
+
+
+def test_early_stopping_disabled_never_stops() -> None:
+    early_stopping = EarlyStopping(
+        EarlyStoppingConfig(enabled=False, patience=1)
+    )
+
+    assert all(
+        early_stopping.update(improved=False) is False for _ in range(20)
+    )
+
+
+def test_early_stopping_counts_consecutive_epochs_without_strict_improvement() -> None:
+    early_stopping = EarlyStopping(
+        EarlyStoppingConfig(enabled=True, patience=2)
+    )
+
+    assert early_stopping.update(improved=True) is False
+    assert early_stopping.update(improved=False) is False
+    assert early_stopping.update(improved=True) is False
+    assert early_stopping.update(improved=False) is False
+    assert early_stopping.update(improved=False) is True
+    assert early_stopping.epochs_without_improvement == 2
+
+
+def test_early_stopping_preserves_macro_f1_best_epoch() -> None:
+    values = [0.50, 0.60, 0.60, 0.59]
+    early_stopping = EarlyStopping(
+        EarlyStoppingConfig(enabled=True, patience=2)
+    )
+    best = -1.0
+    best_epoch = 0
+
+    for epoch, value in enumerate(values, start=1):
+        improved = is_better_validation_macro_f1(value, best)
+        if improved:
+            best = value
+            best_epoch = epoch
+        if early_stopping.update(improved=improved):
+            break
+
+    assert best == pytest.approx(0.60)
+    assert best_epoch == 2
+    assert epoch == 4
+
+
 def test_limit_dataset_none_and_large_limit_use_all_samples() -> None:
     dataset = make_loader().dataset
 
@@ -494,6 +647,26 @@ def test_apply_config_overrides_changes_only_runtime_copy() -> None:
     assert original.training.epochs == 1
     assert original.training.batch_size == 32
     assert original.training.num_workers == 0
+
+
+def test_apply_config_overrides_revalidates_scheduler_epoch_budget() -> None:
+    original = make_config()
+    original = replace(
+        original,
+        training=replace(
+            original.training,
+            epochs=30,
+            scheduler=SchedulerConfig(
+                type="warmup_cosine",
+                warmup_epochs=3,
+                warmup_start_factor=0.1,
+                min_learning_rate=0.000001,
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match=r"warmup_epochs.*epochs"):
+        apply_config_overrides(original, epochs=3)
 
 
 @pytest.mark.parametrize("batch_size", [0, -1, 1.5, True, "64"])
@@ -808,7 +981,7 @@ def test_run_training_saves_best_last_and_history(
         (1, pixels, "Training"),
         (2, pixels, "PublicTest"),
         (3, pixels, "PublicTest"),
-        (4, pixels, "PrivateTest"),
+        ("not parsed", "not parsed", "PrivateTest"),
     ]
     with csv_path.open("w", encoding="utf-8", newline="") as csv_file:
         writer = csv.writer(csv_file)
@@ -869,6 +1042,8 @@ def test_run_training_saves_best_last_and_history(
     assert epoch_record["train_samples_per_second"] > 0.0
     assert epoch_record["cuda_peak_memory_bytes"] == 0
     assert np.isfinite(epoch_record["train_loss"])
+    assert 0.0 <= epoch_record["train_accuracy"] <= 1.0
+    assert epoch_record["learning_rate"] == pytest.approx(0.0001)
     assert np.isfinite(epoch_record["validation_loss"])
     assert 0.0 <= epoch_record["validation_accuracy"] <= 1.0
     assert 0.0 <= epoch_record["validation_macro_f1"] <= 1.0
@@ -950,3 +1125,165 @@ def test_run_training_records_failure_after_run_artifacts_start(
     assert failure["message"] == "synthetic training failure"
     assert metadata["status"] == "failed"
     assert metadata["artifacts"]["failure"] == "failure.json"
+
+
+def write_synthetic_training_csv(tmp_path: Path) -> Path:
+    csv_path = tmp_path / "synthetic-fer2013.csv"
+    pixels = " ".join(["128"] * (48 * 48))
+    with csv_path.open("w", encoding="utf-8", newline="") as csv_file:
+        writer = csv.writer(csv_file)
+        writer.writerow(["emotion", "pixels", "Usage"])
+        writer.writerows(
+            [
+                (0, pixels, "Training"),
+                (1, pixels, "Training"),
+                (0, pixels, "PublicTest"),
+                (1, pixels, "PublicTest"),
+            ]
+        )
+    return csv_path
+
+
+def make_spatial_model() -> nn.Module:
+    return nn.Sequential(
+        nn.Conv2d(3, 4, kernel_size=1),
+        nn.ReLU(),
+        nn.AdaptiveAvgPool2d((1, 1)),
+        nn.Flatten(),
+        nn.Linear(4, 7),
+    )
+
+
+@pytest.mark.parametrize(
+    ("schedule", "epochs", "expected_lrs", "expect_scheduler_state"),
+    [
+        (SchedulerConfig(type="none"), 1, [0.0001], False),
+        (
+            SchedulerConfig(
+                type="warmup_cosine",
+                warmup_epochs=2,
+                warmup_start_factor=0.1,
+                min_learning_rate=0.000001,
+            ),
+            4,
+            [0.00001, 0.0001, 0.0000505, 0.000001],
+            True,
+        ),
+    ],
+)
+def test_synthetic_scheduler_modes_write_current_lr_and_train_accuracy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    schedule: SchedulerConfig,
+    epochs: int,
+    expected_lrs: list[float],
+    expect_scheduler_state: bool,
+) -> None:
+    csv_path = write_synthetic_training_csv(tmp_path)
+    output_directory = tmp_path / f"output-{schedule.type}"
+    original = make_config()
+    config = replace(
+        original,
+        dataset=replace(original.dataset, path=str(csv_path)),
+        model=replace(original.model, pretrained=False),
+        training=replace(
+            original.training,
+            epochs=epochs,
+            batch_size=2,
+            num_workers=0,
+            device="cpu",
+            scheduler=schedule,
+        ),
+        output=replace(original.output, directory=str(output_directory)),
+    )
+    monkeypatch.setattr(
+        "occlusion_fer.train.create_resnet18",
+        lambda **kwargs: make_spatial_model(),
+    )
+
+    run_training(config)
+
+    history = json.loads(
+        (output_directory / "history.json").read_text(encoding="utf-8")
+    )
+    assert [row["learning_rate"] for row in history] == pytest.approx(
+        expected_lrs
+    )
+    assert all(0.0 <= row["train_accuracy"] <= 1.0 for row in history)
+    best = torch.load(
+        output_directory / "best.pt", map_location="cpu", weights_only=False
+    )
+    last = torch.load(
+        output_directory / "last.pt", map_location="cpu", weights_only=False
+    )
+    best_row = max(
+        history,
+        key=lambda row: (row["validation_macro_f1"], -row["epoch"]),
+    )
+    assert best["epoch"] == best_row["epoch"]
+    assert best["validation_macro_f1"] == pytest.approx(
+        best_row["validation_macro_f1"]
+    )
+    assert ("scheduler_state_dict" in last) is expect_scheduler_state
+    if expect_scheduler_state:
+        assert last["scheduler_state_dict"]["current_epoch"] == epochs
+
+
+def test_run_training_early_stops_without_replacing_macro_f1_best(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    csv_path = write_synthetic_training_csv(tmp_path)
+    output_directory = tmp_path / "early-stopping-output"
+    original = make_config()
+    config = replace(
+        original,
+        dataset=replace(original.dataset, path=str(csv_path)),
+        model=replace(original.model, pretrained=False),
+        training=replace(
+            original.training,
+            epochs=5,
+            batch_size=2,
+            num_workers=0,
+            device="cpu",
+            early_stopping=EarlyStoppingConfig(enabled=True, patience=2),
+        ),
+        output=replace(original.output, directory=str(output_directory)),
+    )
+    monkeypatch.setattr(
+        "occlusion_fer.train.create_resnet18",
+        lambda **kwargs: make_spatial_model(),
+    )
+    template = evaluate(
+        make_model(), make_loader(sample_count=2), torch.device("cpu")
+    )
+    macro_f1_values = iter([0.50, 0.60, 0.60, 0.59])
+    accuracy_values = iter([0.40, 0.50, 0.90, 0.95])
+
+    def controlled_evaluate(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        return replace(
+            template,
+            macro_f1=next(macro_f1_values),
+            accuracy=next(accuracy_values),
+        )
+
+    monkeypatch.setattr("occlusion_fer.train.evaluate", controlled_evaluate)
+
+    run_training(config)
+
+    history = json.loads(
+        (output_directory / "history.json").read_text(encoding="utf-8")
+    )
+    best = torch.load(
+        output_directory / "best.pt", map_location="cpu", weights_only=False
+    )
+    last = torch.load(
+        output_directory / "last.pt", map_location="cpu", weights_only=False
+    )
+    assert len(history) == 4
+    assert history[-1]["validation_accuracy"] == pytest.approx(0.95)
+    assert best["epoch"] == 2
+    assert best["validation_macro_f1"] == pytest.approx(0.60)
+    assert best["validation_accuracy"] == pytest.approx(0.50)
+    assert last["epoch"] == 4
