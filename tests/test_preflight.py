@@ -344,6 +344,62 @@ def test_e3_preflight_uses_unsmoothed_validation_and_skips_private_test(
     assert "test_class_counts=" not in output
 
 
+def test_e4_preflight_combination_skips_private_test(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    csv_path = write_csv(tmp_path)
+    rows = []
+    with csv_path.open("r", encoding="utf-8", newline="") as csv_file:
+        rows = list(csv.DictReader(csv_file))
+    for row in rows:
+        if row["Usage"] == "PrivateTest":
+            row["emotion"] = "not parsed"
+            row["pixels"] = "not parsed"
+    with csv_path.open("w", encoding="utf-8", newline="") as csv_file:
+        writer = csv.DictWriter(
+            csv_file, fieldnames=["emotion", "pixels", "Usage"]
+        )
+        writer.writeheader()
+        writer.writerows(rows)
+
+    repository_root = Path(__file__).resolve().parents[1]
+    config_path = (
+        repository_root
+        / "configs"
+        / "experiments"
+        / "fer2013_resnet18_e4_combined.yaml"
+    )
+    synthetic_config_path = tmp_path / "e4-combined-synthetic.yaml"
+    synthetic_config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "  num_workers: 4\n", "  num_workers: 0\n", 1
+        ),
+        encoding="utf-8",
+    )
+    args = parse_args(
+        synthetic_config_path,
+        "--data-path",
+        str(csv_path),
+        "--output-dir",
+        str(tmp_path / "e4-preflight"),
+        "--device",
+        "cpu",
+        "--batch-size",
+        "2",
+        "--skip-model-forward",
+    )
+
+    result = preflight.run_preflight(args)
+
+    output = capsys.readouterr().out
+    assert result.success is True
+    assert "train_samples=8" in output
+    assert "validation_samples=4" in output
+    assert "mild_affine" not in output
+    assert "test_samples=" not in output
+    assert "test_class_counts=" not in output
+
+
 def test_missing_classes_are_warnings_not_failures(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

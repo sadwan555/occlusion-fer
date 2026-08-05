@@ -486,6 +486,69 @@ def test_repository_e3_differs_from_e0_only_in_allowed_fields() -> None:
     assert e0_values == e3_values
 
 
+def test_repository_e4_combines_e2_and_e3_without_e1_scheduler() -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    config_root = repository_root / "configs" / "experiments"
+
+    e0 = load_config(config_root / "fer2013_resnet18_e0_baseline.yaml")
+    e1 = load_config(
+        config_root / "fer2013_resnet18_e1_warmup_cosine.yaml"
+    )
+    e2 = load_config(
+        config_root / "fer2013_resnet18_e2_mild_augmentation.yaml"
+    )
+    e3 = load_config(config_root / "fer2013_resnet18_e3_regularization.yaml")
+    e4 = load_config(config_root / "fer2013_resnet18_e4_combined.yaml")
+
+    assert e4.project.name == "occlusion-fer"
+    assert e4.project.experiment_name == "e4_combined"
+    assert e4.output.directory == "outputs/screening/e4_combined"
+
+    assert e4.dataset.augmentation == e2.dataset.augmentation
+    assert e4.training.loss.type == "cross_entropy"
+    assert e4.training.loss.label_smoothing == pytest.approx(0.1)
+    assert e4.training.loss.label_smoothing == pytest.approx(
+        e3.training.loss.label_smoothing
+    )
+    assert e4.training.weight_decay == pytest.approx(0.001)
+    assert e4.training.weight_decay == pytest.approx(e3.training.weight_decay)
+
+    assert e4.training.scheduler.type == "none"
+    assert e4.training.scheduler.warmup_epochs == 0
+    assert e4.training.scheduler.warmup_start_factor == pytest.approx(1.0)
+    assert e4.training.scheduler.min_learning_rate == pytest.approx(0.0001)
+    assert e4.training.scheduler != e1.training.scheduler
+    assert e4.training.scheduler == e0.training.scheduler
+    assert e4.training.early_stopping == e0.training.early_stopping
+
+    e0_values = asdict(e0)
+    e4_values = asdict(e4)
+    for values in (e0_values, e4_values):
+        values["project"].pop("experiment_name")
+        values["dataset"].pop("augmentation")
+        values["output"].pop("directory")
+        values["training"].pop("weight_decay")
+        values["training"]["loss"].pop("label_smoothing")
+    assert e0_values == e4_values
+
+    e2_values = asdict(e2)
+    e4_values = asdict(e4)
+    for values in (e2_values, e4_values):
+        values["project"].pop("experiment_name")
+        values["output"].pop("directory")
+        values["training"].pop("weight_decay")
+        values["training"]["loss"].pop("label_smoothing")
+    assert e2_values == e4_values
+
+    e3_values = asdict(e3)
+    e4_values = asdict(e4)
+    for values in (e3_values, e4_values):
+        values["project"].pop("experiment_name")
+        values["dataset"].pop("augmentation")
+        values["output"].pop("directory")
+    assert e3_values == e4_values
+
+
 def test_repository_e0_e1_e2_default_to_unsmoothed_loss() -> None:
     repository_root = Path(__file__).resolve().parents[1]
     config_root = repository_root / "configs" / "experiments"

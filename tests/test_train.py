@@ -14,6 +14,7 @@ from torch.utils.data import DataLoader, TensorDataset
 
 import occlusion_fer.evaluation as evaluation_module
 import occlusion_fer.train as train_module
+import occlusion_fer.torch_data as torch_data_module
 from occlusion_fer.config import (
     AppConfig,
     AugmentationConfig,
@@ -25,6 +26,7 @@ from occlusion_fer.config import (
     ProjectConfig,
     SchedulerConfig,
     TrainingConfig,
+    load_config,
 )
 from occlusion_fer.data import Fer2013Data, Fer2013Record
 from occlusion_fer.models import create_resnet18
@@ -1254,6 +1256,113 @@ def test_synthetic_e3_training_isolated_loss_and_optimizer(
     assert resolved["training"]["scheduler"]["type"] == "none"
     assert len(history) == 1
     assert history[0]["learning_rate"] == pytest.approx(0.0001)
+    assert np.isfinite(history[0]["validation_loss"])
+    assert {
+        "train_loss",
+        "train_accuracy",
+        "validation_loss",
+        "validation_accuracy",
+        "validation_macro_f1",
+        "learning_rate",
+    }.issubset(history[0])
+    assert best["epoch"] == 1
+    assert not (output_directory / "final_test").exists()
+
+
+def test_synthetic_e4_training_combines_e2_e3_and_skips_private_test(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    csv_path = write_synthetic_training_csv(tmp_path)
+    output_directory = tmp_path / "e4-output"
+    repository_root = Path(__file__).resolve().parents[1]
+    config = load_config(
+        repository_root
+        / "configs"
+        / "experiments"
+        / "fer2013_resnet18_e4_combined.yaml"
+    )
+    config = replace(
+        config,
+        dataset=replace(config.dataset, path=str(csv_path)),
+        model=replace(config.model, pretrained=False),
+        training=replace(
+            config.training,
+            epochs=1,
+            batch_size=2,
+            num_workers=0,
+            device="cpu",
+        ),
+        output=replace(config.output, directory=str(output_directory)),
+    )
+    monkeypatch.setattr(
+        "occlusion_fer.train.create_resnet18",
+        lambda **kwargs: make_spatial_model(),
+    )
+
+    observed_augmentations: list[tuple[str, str]] = []
+    training_losses: list[float] = []
+    evaluation_losses: list[float] = []
+    optimizer_groups: list[dict[str, object]] = []
+    original_augmentation_builder = torch_data_module.build_augmentation
+    original_training_builder = train_module.build_training_criterion
+    original_evaluation_builder = evaluation_module.build_evaluation_criterion
+    original_optimizer_builder = train_module.build_optimizer
+
+    def recording_augmentation_builder(*, split: str, config: object) -> object:
+        selected_type = getattr(config, "type", "none")
+        observed_augmentations.append((split, selected_type))
+        return original_augmentation_builder(split=split, config=config)
+
+    def recording_training_builder(loss_config: LossConfig) -> nn.Module:
+        criterion = original_training_builder(loss_config)
+        training_losses.append(float(criterion.label_smoothing))
+        return criterion
+
+    def recording_evaluation_builder() -> nn.Module:
+        criterion = original_evaluation_builder()
+        evaluation_losses.append(float(criterion.label_smoothing))
+        return criterion
+
+    def recording_optimizer(model: nn.Module, training: object) -> torch.optim.Optimizer:
+        optimizer = original_optimizer_builder(model, training)
+        optimizer_groups.append(dict(optimizer.param_groups[0]))
+        return optimizer
+
+    monkeypatch.setattr(
+        torch_data_module, "build_augmentation", recording_augmentation_builder
+    )
+    monkeypatch.setattr(
+        train_module, "build_training_criterion", recording_training_builder
+    )
+    monkeypatch.setattr(
+        evaluation_module,
+        "build_evaluation_criterion",
+        recording_evaluation_builder,
+    )
+    monkeypatch.setattr(train_module, "build_optimizer", recording_optimizer)
+
+    run_training(config)
+
+    resolved = yaml.safe_load(
+        (output_directory / "resolved_config.yaml").read_text(encoding="utf-8")
+    )
+    history = json.loads(
+        (output_directory / "history.json").read_text(encoding="utf-8")
+    )
+    best = torch.load(
+        output_directory / "best.pt", map_location="cpu", weights_only=False
+    )
+    assert observed_augmentations == [("train", "mild_affine"), ("validation", "none")]
+    assert training_losses == [pytest.approx(0.1)]
+    assert evaluation_losses == [pytest.approx(0.0)]
+    assert optimizer_groups[0]["lr"] == pytest.approx(0.0001)
+    assert optimizer_groups[0]["weight_decay"] == pytest.approx(0.001)
+    assert resolved["dataset"]["augmentation"]["degrees"] == pytest.approx(7.0)
+    assert resolved["training"]["loss"]["label_smoothing"] == pytest.approx(0.1)
+    assert resolved["training"]["weight_decay"] == pytest.approx(0.001)
+    assert resolved["training"]["scheduler"]["type"] == "none"
+    assert len(history) == 1
     assert np.isfinite(history[0]["validation_loss"])
     assert {
         "train_loss",

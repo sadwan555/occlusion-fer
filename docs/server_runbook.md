@@ -425,7 +425,96 @@ python -m occlusion_fer.train \
 
 筛选条件固定为：
 `E3_best_macro_f1 - E0_control_best_macro_f1 >= -0.0030`。不要调整 smoothing、
-weight decay、checkpoint 指标或运行额外 seed；本阶段不访问 PrivateTest，也不实现 E4。
+weight decay、checkpoint 指标或运行额外 seed；本阶段不访问 PrivateTest。
+
+## 8.3 E4 combined screening
+
+E4 只组合已通过筛选的 E2 与 E3，不引入新的算法：训练使用 E2 的 locked
+`mild_affine` augmentation，并使用 E3 的
+`CrossEntropyLoss(label_smoothing=0.1)` 与 AdamW `weight_decay=1e-3`。
+validation 和未来锁定后的 final evaluation 继续使用普通交叉熵
+(`label_smoothing=0.0`)；validation 不使用 augmentation。E1 的
+warmup/cosine 不属于 E4，scheduler 必须保持 `none`，base learning rate 与
+minimum learning rate 均为 `1e-4`。
+
+E4 配置文件为
+`configs/experiments/fer2013_resnet18_e4_combined.yaml`，基准为 E3
+commit。由于 E4 改变训练数据管线，正式比较必须在同一个 E4 commit 上先
+重新运行 E0-control，再严格顺序运行 E4；旧 E0/E2/E3 结果只作历史参考。
+本阶段只使用 seed 2026 筛选，不运行 E2/E3 重复实验，不调用
+`final_evaluate`，不访问 PrivateTest。
+
+建议结果根目录：
+
+```text
+/home/ucla/anson-fer/results/screening-<E4_COMMIT_SHORT>/
+  e0_control/seed2026/
+  e4_combined/seed2026/
+  logs/
+  preflight/
+```
+
+先在服务器确认 clean checkout、四份历史配置和 E4 配置 hash；不得修改
+E0/E1/E2/E3 YAML：
+
+```bash
+export FER_E4_SCREENING_ROOT="${FER_WORK_ROOT}/results/screening-<E4_COMMIT_SHORT>"
+export FER_E4_LOGS="${FER_E4_SCREENING_ROOT}/logs"
+export FER_E4_PREFLIGHT="${FER_E4_SCREENING_ROOT}/preflight"
+export FER_E4_CONTROL_RUN="${FER_E4_SCREENING_ROOT}/e0_control/seed2026"
+export FER_E4_RUN="${FER_E4_SCREENING_ROOT}/e4_combined/seed2026"
+mkdir -p "${FER_E4_LOGS}" "${FER_E4_PREFLIGHT}"
+
+git status --short
+git rev-parse HEAD
+sha256sum \
+  configs/experiments/fer2013_resnet18_e0_baseline.yaml \
+  configs/experiments/fer2013_resnet18_e1_warmup_cosine.yaml \
+  configs/experiments/fer2013_resnet18_e2_mild_augmentation.yaml \
+  configs/experiments/fer2013_resnet18_e3_regularization.yaml \
+  configs/experiments/fer2013_resnet18_e4_combined.yaml
+```
+
+确认 E0-control 和 E4 run 目录不存在或为空后，依次执行以下命令。每个
+preflight 必须只报告 Training 与 PublicTest；若出现 `PrivateTest`、test
+counts 或 final-test artifacts，立即停止：
+
+```bash
+python -m occlusion_fer.preflight \
+  --config configs/experiments/fer2013_resnet18_e0_baseline.yaml \
+  --data-path "${FER_DATA_CSV}" \
+  --output-dir "${FER_E4_PREFLIGHT}/e0-control-seed2026" \
+  --device cuda --batch-size 128 \
+  2>&1 | tee "${FER_E4_LOGS}/e0-control-seed2026-preflight.log"
+
+python -m occlusion_fer.train \
+  --config configs/experiments/fer2013_resnet18_e0_baseline.yaml \
+  --data-path "${FER_DATA_CSV}" \
+  --output-dir "${FER_E4_CONTROL_RUN}" \
+  --seed 2026 --device cuda --batch-size 128 --num-workers 4 --amp \
+  2>&1 | tee "${FER_E4_LOGS}/e0-control-seed2026-train.log"
+
+python -m occlusion_fer.preflight \
+  --config configs/experiments/fer2013_resnet18_e4_combined.yaml \
+  --data-path "${FER_DATA_CSV}" \
+  --output-dir "${FER_E4_PREFLIGHT}/e4-seed2026" \
+  --device cuda --batch-size 128 \
+  2>&1 | tee "${FER_E4_LOGS}/e4-seed2026-preflight.log"
+
+python -m occlusion_fer.train \
+  --config configs/experiments/fer2013_resnet18_e4_combined.yaml \
+  --data-path "${FER_DATA_CSV}" \
+  --output-dir "${FER_E4_RUN}" \
+  --seed 2026 --device cuda --batch-size 128 --num-workers 4 --amp \
+  2>&1 | tee "${FER_E4_LOGS}/e4-seed2026-train.log"
+```
+
+After both runs complete, compare the unrounded values in
+`validation/best_metrics.json` using the pre-registered rule:
+`E4_best_macro_f1 - E0_control_best_macro_f1 >= -0.0030`. Keep `best.pt`,
+`last.pt`, history, validation metrics, logs and provenance for both runs. This
+screening stage does not evaluate PrivateTest or determine any later E2/E3
+parameters.
 
 ## 9. 三种子正式 clean 训练
 
