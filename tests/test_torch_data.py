@@ -1,3 +1,4 @@
+import importlib
 from collections.abc import Iterable
 
 import numpy as np
@@ -138,13 +139,13 @@ def test_resize_uses_interpolation_instead_of_nearest_copying() -> None:
 def test_resize_interpolates_one_channel_before_replication(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    interpolate_input_shapes: list[tuple[int, ...]] = []
+    interpolate_calls: list[tuple[tuple[int, ...], dict[str, object]]] = []
     original_interpolate = torch_data_module.F.interpolate
 
     def recording_interpolate(
         image: torch.Tensor, *args: object, **kwargs: object
     ) -> torch.Tensor:
-        interpolate_input_shapes.append(tuple(image.shape))
+        interpolate_calls.append((tuple(image.shape), dict(kwargs)))
         return original_interpolate(image, *args, **kwargs)
 
     monkeypatch.setattr(
@@ -153,7 +154,16 @@ def test_resize_interpolates_one_channel_before_replication(
 
     image, _, _ = Fer2013TorchDataset(make_data(), split="train")[0]
 
-    assert interpolate_input_shapes == [(1, 1, 48, 48)]
+    assert interpolate_calls == [
+        (
+            (1, 1, 48, 48),
+            {
+                "size": (112, 112),
+                "mode": "bilinear",
+                "align_corners": False,
+            },
+        )
+    ]
     assert image.shape == (3, 112, 112)
 
 
@@ -194,6 +204,64 @@ def test_imagenet_normalization_does_not_modify_original_numpy_image() -> None:
     dataset[0]
 
     np.testing.assert_array_equal(data.records[0].image, original_image)
+
+
+def test_locked_clean_tensor_is_unchanged_by_stage_a_module_imports() -> None:
+    source_image = (
+        np.arange(48 * 48, dtype=np.uint16).reshape(48, 48) % 256
+    ).astype(np.uint8)
+    data = make_data(
+        [make_record(2, 4, "validation", image=source_image)]
+    )
+    dataset = Fer2013TorchDataset(
+        data,
+        split="validation",
+        image_size=112,
+        normalize_imagenet=True,
+    )
+
+    before_image, before_label, before_sample_id = dataset[0]
+    for module_name in (
+        "occlusion_fer.mask_hash",
+        "occlusion_fer.occlusion",
+        "occlusion_fer.training_mean",
+        "occlusion_fer.mask_manifest",
+        "occlusion_fer.stage_a_artifacts",
+    ):
+        importlib.import_module(module_name)
+    after_image, after_label, after_sample_id = dataset[0]
+
+    assert before_image.shape == (3, 112, 112)
+    assert before_image.dtype == torch.float32
+    assert torch.isfinite(before_image).all()
+    assert float(before_image.min()) == pytest.approx(
+        -2.1179039478302,
+        abs=1e-6,
+    )
+    assert float(before_image.max()) == pytest.approx(
+        2.640000104904175,
+        abs=1e-6,
+    )
+    assert float(before_image.to(torch.float64).sum()) == pytest.approx(
+        8526.2647,
+        abs=5e-4,
+    )
+    torch.testing.assert_close(
+        before_image[:, 55, 55],
+        torch.tensor(
+            [-0.11430713534355164, 0.012605716474354267, 0.2347719669342041]
+        ),
+        rtol=0,
+        atol=1e-6,
+    )
+    mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+    replicated_gray = before_image * std + mean
+    torch.testing.assert_close(replicated_gray[0], replicated_gray[1])
+    torch.testing.assert_close(replicated_gray[1], replicated_gray[2])
+    assert before_label == after_label == 4
+    assert before_sample_id == after_sample_id == 2
+    assert torch.equal(before_image, after_image)
 
 
 def test_explicitly_disabling_imagenet_normalization_preserves_old_behavior() -> None:
