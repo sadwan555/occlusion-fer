@@ -549,6 +549,108 @@ def test_repository_e4_combines_e2_and_e3_without_e1_scheduler() -> None:
     assert e3_values == e4_values
 
 
+@pytest.mark.parametrize(
+    (
+        "filename",
+        "experiment_name",
+        "output_directory",
+        "image_size",
+        "epochs",
+        "allowed_differences",
+    ),
+    [
+        (
+            "fer2013_resnet18_e5_longer_training.yaml",
+            "e5_longer_training",
+            "outputs/screening/e5_longer_training",
+            112,
+            50,
+            {
+                "project.experiment_name",
+                "output.directory",
+                "training.epochs",
+            },
+        ),
+        (
+            "fer2013_resnet18_e6_high_resolution.yaml",
+            "e6_high_resolution",
+            "outputs/screening/e6_high_resolution",
+            224,
+            30,
+            {
+                "dataset.image_size",
+                "project.experiment_name",
+                "output.directory",
+            },
+        ),
+        (
+            "fer2013_resnet18_e7_high_resolution_longer.yaml",
+            "e7_high_resolution_longer",
+            "outputs/screening/e7_high_resolution_longer",
+            224,
+            50,
+            {
+                "dataset.image_size",
+                "project.experiment_name",
+                "output.directory",
+                "training.epochs",
+            },
+        ),
+    ],
+)
+def test_repository_e5_e7_configs_differ_from_e4_only_as_registered(
+    filename: str,
+    experiment_name: str,
+    output_directory: str,
+    image_size: int,
+    epochs: int,
+    allowed_differences: set[str],
+) -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    config_root = repository_root / "configs" / "experiments"
+    e1 = load_config(
+        config_root / "fer2013_resnet18_e1_warmup_cosine.yaml"
+    )
+    e4 = load_config(config_root / "fer2013_resnet18_e4_combined.yaml")
+    candidate = load_config(config_root / filename)
+
+    assert candidate.project.experiment_name == experiment_name
+    assert candidate.output.directory == output_directory
+    assert candidate.dataset.image_size == image_size
+    assert candidate.training.epochs == epochs
+    assert candidate.dataset.augmentation == e4.dataset.augmentation
+    assert candidate.training.loss == e4.training.loss
+    assert candidate.training.learning_rate == pytest.approx(0.0001)
+    assert candidate.training.weight_decay == pytest.approx(0.001)
+    assert candidate.training.batch_size == 128
+    assert candidate.training.num_workers == 4
+    assert candidate.training.seed == 2026
+    assert candidate.training.scheduler.type == "none"
+    assert candidate.training.scheduler.warmup_epochs == 0
+    assert candidate.training.scheduler.warmup_start_factor == pytest.approx(1.0)
+    assert candidate.training.scheduler.min_learning_rate == pytest.approx(0.0001)
+    assert candidate.training.scheduler != e1.training.scheduler
+    assert candidate.training.early_stopping.enabled is False
+
+    def flatten(value: object, prefix: str = "") -> dict[str, object]:
+        if not isinstance(value, dict):
+            return {prefix: value}
+        flattened: dict[str, object] = {}
+        for key, nested_value in value.items():
+            path = f"{prefix}.{key}" if prefix else key
+            flattened.update(flatten(nested_value, path))
+        return flattened
+
+    e4_values = flatten(asdict(e4))
+    candidate_values = flatten(asdict(candidate))
+    actual_differences = {
+        key
+        for key in e4_values
+        if e4_values[key] != candidate_values[key]
+    }
+    assert actual_differences == allowed_differences
+
+
 def test_repository_e0_e1_e2_default_to_unsmoothed_loss() -> None:
     repository_root = Path(__file__).resolve().parents[1]
     config_root = repository_root / "configs" / "experiments"

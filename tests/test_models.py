@@ -37,11 +37,14 @@ def test_creates_standard_resnet18_without_pretrained_download(
     assert model.fc.out_features == 7
 
 
-@pytest.mark.parametrize("batch_size", [1, 4])
+@pytest.mark.parametrize(
+    ("batch_size", "image_size"),
+    [(1, 112), (4, 112), (1, 224)],
+)
 def test_resnet18_returns_finite_floating_logits_with_expected_shape(
-    seven_class_model: nn.Module, batch_size: int
+    seven_class_model: nn.Module, batch_size: int, image_size: int
 ) -> None:
-    images = torch.zeros(batch_size, 3, 112, 112)
+    images = torch.zeros(batch_size, 3, image_size, image_size)
 
     with torch.inference_mode():
         logits = seven_class_model(images)

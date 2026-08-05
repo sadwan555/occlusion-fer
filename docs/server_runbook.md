@@ -516,6 +516,156 @@ After both runs complete, compare the unrounded values in
 screening stage does not evaluate PrivateTest or determine any later E2/E3
 parameters.
 
+## 8.4 Second-round E5-E7 screening
+
+The first-round E4 result is the locked reference for this limited second
+round, not a successful final result. Its seed-2026 PublicTest values are
+`accuracy=0.6870994706046253` and `macro_f1=0.6803268061914639`. The project
+goal remains mean PrivateTest top-1 accuracy of at least `0.70` across formal
+seeds 42, 123 and 2026; PrivateTest is not accessed during this screening.
+
+Exactly three candidates are registered, and all retain the complete E4 recipe:
+
+| Candidate | Config | Image size | Epochs | Only change from E4 |
+|---|---|---:|---:|---|
+| E5 | `fer2013_resnet18_e5_longer_training.yaml` | 112 | 50 | epochs |
+| E6 | `fer2013_resnet18_e6_high_resolution.yaml` | 224 | 30 | image size |
+| E7 | `fer2013_resnet18_e7_high_resolution_longer.yaml` | 224 | 50 | image size and epochs |
+
+Do not change batch size 128, augmentation, label smoothing, weight decay,
+learning rate, seed, scheduler, early stopping or checkpoint selection after
+any intermediate result. E1 warmup/cosine remains excluded. All three candidates
+must use one clean second-round commit and run sequentially unless a candidate
+has a recorded execution failure.
+
+This commit adds configurations and tests only, so E4 does not need to be
+trained again by default. Before relying on the existing E4 reference, verify
+the E4 YAML hash, commit ancestry, clean Git state and server tests. If any
+production file under `src/occlusion_fer` differs from the E4 commit, stop and
+do not run the second round under this protocol.
+
+Use independent output directories:
+
+```text
+/home/ucla/anson-fer/results/second-round-<COMMIT_SHORT>/
+  e5_longer_training/seed2026/
+  e6_high_resolution/seed2026/
+  e7_high_resolution_longer/seed2026/
+  logs/
+  preflight/
+  second_round_decision.json
+  second_round_decision.md
+```
+
+Prepare and verify provenance before any preflight:
+
+```bash
+export FER_SECOND_ROUND_ROOT="${FER_WORK_ROOT}/results/second-round-<COMMIT_SHORT>"
+export FER_SECOND_ROUND_LOGS="${FER_SECOND_ROUND_ROOT}/logs"
+export FER_SECOND_ROUND_PREFLIGHT="${FER_SECOND_ROUND_ROOT}/preflight"
+mkdir -p "${FER_SECOND_ROUND_LOGS}" "${FER_SECOND_ROUND_PREFLIGHT}"
+
+git status --short
+git rev-parse HEAD
+git merge-base --is-ancestor ee42c511b427e9a7a3fef8879ab83bad283b5cb3 HEAD
+git diff ee42c511b427e9a7a3fef8879ab83bad283b5cb3..HEAD -- src/occlusion_fer
+sha256sum configs/experiments/fer2013_resnet18_e{0,1,2,3,4,5,6,7}_*.yaml
+
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m pytest \
+  tests/test_config.py tests/test_models.py tests/test_torch_data.py \
+  tests/test_losses.py tests/test_train.py tests/test_evaluation.py \
+  tests/test_preflight.py \
+  tests/test_final_evaluate.py tests/test_second_round_screening.py \
+  -q -p no:cacheprovider
+```
+
+Run E5, E6 and E7 in that order. Each preflight and training entry point loads
+only Training and PublicTest. Do not invoke `final_evaluate`:
+
+```bash
+set -o pipefail
+for FER_CANDIDATE in \
+  "e5_longer_training" \
+  "e6_high_resolution" \
+  "e7_high_resolution_longer"; do
+  FER_CONFIG="configs/experiments/fer2013_resnet18_${FER_CANDIDATE}.yaml"
+  FER_RUN="${FER_SECOND_ROUND_ROOT}/${FER_CANDIDATE}/seed2026"
+
+  python -m occlusion_fer.preflight \
+    --config "${FER_CONFIG}" \
+    --data-path "${FER_DATA_CSV}" \
+    --output-dir "${FER_SECOND_ROUND_PREFLIGHT}/${FER_CANDIDATE}-seed2026" \
+    --device cuda --batch-size 128 \
+    2>&1 | tee "${FER_SECOND_ROUND_LOGS}/${FER_CANDIDATE}-preflight.log" || break
+
+  python -m occlusion_fer.train \
+    --config "${FER_CONFIG}" \
+    --data-path "${FER_DATA_CSV}" \
+    --output-dir "${FER_RUN}" \
+    --seed 2026 --device cuda --batch-size 128 --num-workers 4 --amp \
+    2>&1 | tee "${FER_SECOND_ROUND_LOGS}/${FER_CANDIDATE}-train.log" || break
+done
+```
+
+For 224x224 candidates, batch size remains 128. If CUDA reports OOM, preserve
+the failure artifacts and stop that candidate; do not lower the batch size or
+add gradient accumulation.
+
+Use raw JSON floats for the pre-registered decision. A candidate passes the
+basic protection only when both conditions hold:
+
+```text
+candidate_macro_f1 >= 0.6773268061914639
+candidate_accuracy > 0.6870994706046253
+```
+
+It can enter formal three-seed training only when it also satisfies
+`candidate_accuracy >= 0.70`. If multiple candidates satisfy all conditions,
+rank by accuracy, then macro-F1, then lower compute in the order E5, E6, E7.
+The following read-only script applies that rule without rounding:
+
+```bash
+python - <<'PY'
+import json
+import os
+from pathlib import Path
+
+root = Path(os.environ["FER_SECOND_ROUND_ROOT"])
+reference_accuracy = 0.6870994706046253
+macro_f1_floor = 0.6773268061914639
+formal_accuracy_gate = 0.70
+specs = (
+    ("E5", "e5_longer_training", 0),
+    ("E6", "e6_high_resolution", 1),
+    ("E7", "e7_high_resolution_longer", 2),
+)
+rows = []
+for name, directory, compute_order in specs:
+    path = root / directory / "seed2026/validation/best_metrics.json"
+    metrics = json.loads(path.read_text(encoding="utf-8"))
+    accuracy = float(metrics["accuracy"])
+    macro_f1 = float(metrics["macro_f1"])
+    protected = macro_f1 >= macro_f1_floor and accuracy > reference_accuracy
+    rows.append({
+        "name": name,
+        "accuracy": accuracy,
+        "macro_f1": macro_f1,
+        "passes_protection": protected,
+        "eligible_for_formal_seeds": protected and accuracy >= formal_accuracy_gate,
+        "compute_order": compute_order,
+    })
+eligible = [row for row in rows if row["eligible_for_formal_seeds"]]
+eligible.sort(
+    key=lambda row: (-row["accuracy"], -row["macro_f1"], row["compute_order"])
+)
+print(json.dumps({"candidates": rows, "selected": eligible[0] if eligible else None}, indent=2))
+PY
+```
+
+If no candidate reaches PublicTest accuracy `0.70`, record the second round as
+unsuccessful and stop. Do not run formal seeds, access PrivateTest, modify these
+three candidates, or add a new candidate based on the results.
+
 ## 9. 三种子正式 clean 训练
 
 开始前再次确认 Git 干净，并记录环境。不要使用 `max-*-samples`：

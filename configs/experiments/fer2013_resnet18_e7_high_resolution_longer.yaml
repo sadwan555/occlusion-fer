@@ -1,0 +1,46 @@
+project:
+  name: occlusion-fer
+  experiment_name: e7_high_resolution_longer
+
+dataset:
+  name: fer2013
+  path: /path/to/fer2013.csv
+  image_size: 224
+  num_classes: 7
+  augmentation:
+    type: mild_affine
+    horizontal_flip_probability: 0.5
+    affine_probability: 0.5
+    degrees: 7.0
+    translate: [0.05, 0.05]
+    scale: [0.97, 1.03]
+    interpolation: bilinear
+    fill: 0.0
+
+model:
+  name: resnet18
+  pretrained: true
+
+training:
+  mode: clean
+  seed: 2026
+  epochs: 50
+  batch_size: 128
+  learning_rate: 0.0001
+  weight_decay: 0.001
+  num_workers: 4
+  device: cuda
+  loss:
+    type: cross_entropy
+    label_smoothing: 0.1
+  scheduler:
+    type: none
+    warmup_epochs: 0
+    warmup_start_factor: 1.0
+    min_learning_rate: 0.0001
+  early_stopping:
+    enabled: false
+    patience: 8
+
+output:
+  directory: outputs/screening/e7_high_resolution_longer
