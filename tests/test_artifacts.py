@@ -212,6 +212,32 @@ def test_write_history_artifacts_keeps_json_and_csv_consistent(
     assert rows[1]["validation_macro_f1"] == "0.55"
 
 
+def test_write_history_artifacts_persists_train_accuracy_and_learning_rate(
+    tmp_path: Path,
+) -> None:
+    history = [
+        {
+            "epoch": 1,
+            "train_samples": 5,
+            "train_loss": 1.25,
+            "train_accuracy": 0.6,
+            "learning_rate": 0.00001,
+            "validation_samples": 2,
+            "validation_loss": 1.1,
+            "validation_accuracy": 0.5,
+            "validation_macro_f1": 0.4,
+        }
+    ]
+
+    json_path, csv_path = write_history_artifacts(tmp_path, history)
+
+    assert json.loads(json_path.read_text(encoding="utf-8")) == history
+    fields, rows = read_csv(csv_path)
+    assert fields == list(history[0])
+    assert rows[0]["train_accuracy"] == "0.6"
+    assert rows[0]["learning_rate"] == "1e-05"
+
+
 def test_write_resolved_config_outputs_yaml(tmp_path: Path) -> None:
     path = write_resolved_config(
         tmp_path,
