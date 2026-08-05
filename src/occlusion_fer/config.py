@@ -1,6 +1,7 @@
 """Configuration loading for occlusion-fer."""
 
 from dataclasses import dataclass, field
+import math
 from pathlib import Path
 from typing import Mapping
 
@@ -18,11 +19,24 @@ class ProjectConfig:
 
 
 @dataclass(frozen=True)
+class AugmentationConfig:
+    type: str = "none"
+    horizontal_flip_probability: float = 0.5
+    affine_probability: float = 0.5
+    degrees: float = 7.0
+    translate: tuple[float, float] = (0.05, 0.05)
+    scale: tuple[float, float] = (0.97, 1.03)
+    interpolation: str = "bilinear"
+    fill: float = 0.0
+
+
+@dataclass(frozen=True)
 class DatasetConfig:
     name: str
     path: str
     image_size: int
     num_classes: int
+    augmentation: AugmentationConfig = field(default_factory=AugmentationConfig)
 
 
 @dataclass(frozen=True)
@@ -115,6 +129,7 @@ def load_config(path: str | Path) -> AppConfig:
     num_classes = _require_integer(dataset, "num_classes", "dataset.num_classes")
     if num_classes != 7:
         raise ConfigError("dataset.num_classes must be 7")
+    augmentation = _parse_augmentation(dataset)
 
     model_name = _require_string(model, "name", "model.name")
     if model_name != "resnet18":
@@ -233,6 +248,7 @@ def load_config(path: str | Path) -> AppConfig:
             path=dataset_path,
             image_size=image_size,
             num_classes=num_classes,
+            augmentation=augmentation,
         ),
         model=ModelConfig(name=model_name, pretrained=pretrained),
         training=TrainingConfig(
@@ -383,3 +399,134 @@ def _optional_bool(
     if key not in mapping:
         return default
     return _require_bool(mapping, key, field_name)
+
+
+def _parse_augmentation(
+    dataset: Mapping[str, object],
+) -> AugmentationConfig:
+    augmentation = _optional_mapping(
+        dataset, "augmentation", "dataset.augmentation"
+    )
+    augmentation_type = _optional_string(
+        augmentation,
+        "type",
+        "dataset.augmentation.type",
+        default="none",
+    )
+    if augmentation_type not in {"none", "mild_affine"}:
+        raise ConfigError(
+            "dataset.augmentation.type must be one of none, mild_affine"
+        )
+
+    flip_probability = _optional_finite_number(
+        augmentation,
+        "horizontal_flip_probability",
+        "dataset.augmentation.horizontal_flip_probability",
+        default=0.5,
+    )
+    _require_probability(
+        flip_probability,
+        "dataset.augmentation.horizontal_flip_probability",
+    )
+    affine_probability = _optional_finite_number(
+        augmentation,
+        "affine_probability",
+        "dataset.augmentation.affine_probability",
+        default=0.5,
+    )
+    _require_probability(
+        affine_probability,
+        "dataset.augmentation.affine_probability",
+    )
+    degrees = _optional_finite_number(
+        augmentation,
+        "degrees",
+        "dataset.augmentation.degrees",
+        default=7.0,
+    )
+    if degrees < 0:
+        raise ConfigError("dataset.augmentation.degrees must be non-negative")
+    translate = _optional_pair(
+        augmentation,
+        "translate",
+        "dataset.augmentation.translate",
+        default=(0.05, 0.05),
+    )
+    if any(value < 0 or value > 1 for value in translate):
+        raise ConfigError(
+            "dataset.augmentation.translate values must be between 0 and 1"
+        )
+    scale = _optional_pair(
+        augmentation,
+        "scale",
+        "dataset.augmentation.scale",
+        default=(0.97, 1.03),
+    )
+    if any(value <= 0 for value in scale) or scale[0] > scale[1]:
+        raise ConfigError(
+            "dataset.augmentation.scale must contain positive values in ascending order"
+        )
+    interpolation = _optional_string(
+        augmentation,
+        "interpolation",
+        "dataset.augmentation.interpolation",
+        default="bilinear",
+    )
+    if interpolation != "bilinear":
+        raise ConfigError(
+            "dataset.augmentation.interpolation must be bilinear"
+        )
+    fill = _optional_finite_number(
+        augmentation,
+        "fill",
+        "dataset.augmentation.fill",
+        default=0.0,
+    )
+    return AugmentationConfig(
+        type=augmentation_type,
+        horizontal_flip_probability=float(flip_probability),
+        affine_probability=float(affine_probability),
+        degrees=float(degrees),
+        translate=translate,
+        scale=scale,
+        interpolation=interpolation,
+        fill=float(fill),
+    )
+
+
+def _optional_finite_number(
+    mapping: Mapping[str, object],
+    key: str,
+    field_name: str,
+    *,
+    default: float,
+) -> float:
+    value = default if key not in mapping else _require_number(mapping, key, field_name)
+    if not math.isfinite(float(value)):
+        raise ConfigError(f"{field_name} must be finite")
+    return float(value)
+
+
+def _optional_pair(
+    mapping: Mapping[str, object],
+    key: str,
+    field_name: str,
+    *,
+    default: tuple[float, float],
+) -> tuple[float, float]:
+    if key not in mapping:
+        return default
+    value = mapping[key]
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        raise ConfigError(f"{field_name} must contain exactly two numbers")
+    if any(type(item) not in (int, float) for item in value):
+        raise ConfigError(f"{field_name} must contain exactly two numbers")
+    pair = (float(value[0]), float(value[1]))
+    if not all(math.isfinite(item) for item in pair):
+        raise ConfigError(f"{field_name} values must be finite")
+    return pair
+
+
+def _require_probability(value: float, field_name: str) -> None:
+    if not 0 <= value <= 1:
+        raise ConfigError(f"{field_name} must be between 0 and 1")

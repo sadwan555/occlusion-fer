@@ -45,6 +45,14 @@ def add_training_settings(content: str, settings: str) -> str:
     )
 
 
+def add_dataset_settings(content: str, settings: str) -> str:
+    return content.replace(
+        "  num_classes: 7\n",
+        f"  num_classes: 7\n{settings}",
+        1,
+    )
+
+
 def test_loads_valid_configuration(tmp_path: Path) -> None:
     config = load_config(write_config(tmp_path, VALID_CONFIG))
 
@@ -66,7 +74,126 @@ def test_loads_valid_configuration(tmp_path: Path) -> None:
     assert config.training.scheduler.type == "none"
     assert config.training.scheduler.warmup_epochs == 0
     assert config.training.early_stopping.enabled is False
+    assert config.dataset.augmentation.type == "none"
     assert config.output.directory == "outputs/smoke"
+
+
+def test_loads_mild_affine_augmentation(tmp_path: Path) -> None:
+    content = add_dataset_settings(
+        VALID_CONFIG,
+        """\
+  augmentation:
+    type: mild_affine
+    horizontal_flip_probability: 0.5
+    affine_probability: 0.5
+    degrees: 7.0
+    translate: [0.05, 0.05]
+    scale: [0.97, 1.03]
+    interpolation: bilinear
+    fill: 0.0
+""",
+    )
+
+    config = load_config(write_config(tmp_path, content))
+
+    augmentation = config.dataset.augmentation
+    assert augmentation.type == "mild_affine"
+    assert augmentation.horizontal_flip_probability == pytest.approx(0.5)
+    assert augmentation.affine_probability == pytest.approx(0.5)
+    assert augmentation.degrees == pytest.approx(7.0)
+    assert augmentation.translate == pytest.approx((0.05, 0.05))
+    assert augmentation.scale == pytest.approx((0.97, 1.03))
+    assert augmentation.interpolation == "bilinear"
+    assert augmentation.fill == pytest.approx(0.0)
+
+
+def test_rejects_unknown_augmentation_type(tmp_path: Path) -> None:
+    content = add_dataset_settings(
+        VALID_CONFIG,
+        """\
+  augmentation:
+    type: random_erasing
+""",
+    )
+
+    with pytest.raises(ConfigError, match=r"dataset\.augmentation\.type"):
+        load_config(write_config(tmp_path, content))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("horizontal_flip_probability", -0.1),
+        ("horizontal_flip_probability", 1.1),
+        ("affine_probability", -0.1),
+        ("affine_probability", 1.1),
+        ("degrees", -1.0),
+        ("fill", "nan"),
+    ],
+)
+def test_rejects_invalid_augmentation_scalar(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    rendered = repr(value) if isinstance(value, str) else str(value)
+    content = add_dataset_settings(
+        VALID_CONFIG,
+        f"""\
+  augmentation:
+    type: mild_affine
+    {field}: {rendered}
+""",
+    )
+
+    with pytest.raises(ConfigError, match=r"dataset\.augmentation"):
+        load_config(write_config(tmp_path, content))
+
+
+@pytest.mark.parametrize("translate", ["[-0.01, 0.05]", "[0.05, 1.01]"])
+def test_rejects_augmentation_translation_out_of_range(
+    tmp_path: Path, translate: str
+) -> None:
+    content = add_dataset_settings(
+        VALID_CONFIG,
+        f"""\
+  augmentation:
+    type: mild_affine
+    translate: {translate}
+""",
+    )
+
+    with pytest.raises(ConfigError, match=r"dataset\.augmentation\.translate"):
+        load_config(write_config(tmp_path, content))
+
+
+@pytest.mark.parametrize("scale", ["[0.0, 1.0]", "[1.03, 0.97]", "[0.9]"])
+def test_rejects_augmentation_scale(tmp_path: Path, scale: str) -> None:
+    content = add_dataset_settings(
+        VALID_CONFIG,
+        f"""\
+  augmentation:
+    type: mild_affine
+    scale: {scale}
+""",
+    )
+
+    with pytest.raises(ConfigError, match=r"dataset\.augmentation\.scale"):
+        load_config(write_config(tmp_path, content))
+
+
+def test_rejects_non_bilinear_augmentation_interpolation(tmp_path: Path) -> None:
+    content = add_dataset_settings(
+        VALID_CONFIG,
+        """\
+  augmentation:
+    type: mild_affine
+    interpolation: nearest
+""",
+    )
+
+    with pytest.raises(
+        ConfigError, match=r"dataset\.augmentation\.interpolation"
+    ):
+        load_config(write_config(tmp_path, content))
 
 
 def test_loads_explicit_none_scheduler_without_changing_base_lr(
@@ -234,6 +361,8 @@ def test_repository_e0_e1_configs_differ_only_in_locked_fields() -> None:
     assert e1.training.scheduler.min_learning_rate == pytest.approx(1e-6)
     assert e0.training.early_stopping.enabled is False
     assert e1.training.early_stopping.enabled is False
+    assert e0.dataset.augmentation.type == "none"
+    assert e1.dataset.augmentation.type == "none"
 
     e0_values = asdict(e0)
     e1_values = asdict(e1)
@@ -242,6 +371,33 @@ def test_repository_e0_e1_configs_differ_only_in_locked_fields() -> None:
         values["training"].pop("scheduler")
         values["output"].pop("directory")
     assert e0_values == e1_values
+
+
+def test_repository_e2_differs_from_e0_only_in_allowed_fields() -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    config_root = repository_root / "configs" / "experiments"
+
+    e0 = load_config(config_root / "fer2013_resnet18_e0_baseline.yaml")
+    e2 = load_config(
+        config_root / "fer2013_resnet18_e2_mild_augmentation.yaml"
+    )
+    augmentation = e2.dataset.augmentation
+    assert augmentation.type == "mild_affine"
+    assert augmentation.horizontal_flip_probability == pytest.approx(0.5)
+    assert augmentation.affine_probability == pytest.approx(0.5)
+    assert augmentation.degrees == pytest.approx(7.0)
+    assert augmentation.translate == pytest.approx((0.05, 0.05))
+    assert augmentation.scale == pytest.approx((0.97, 1.03))
+    assert augmentation.interpolation == "bilinear"
+    assert augmentation.fill == pytest.approx(0.0)
+
+    e0_values = asdict(e0)
+    e2_values = asdict(e2)
+    for values in (e0_values, e2_values):
+        values["project"].pop("experiment_name")
+        values["dataset"].pop("augmentation")
+        values["output"].pop("directory")
+    assert e0_values == e2_values
 
 
 def test_rejects_empty_project_name(tmp_path: Path) -> None:

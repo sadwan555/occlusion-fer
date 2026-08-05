@@ -5,6 +5,8 @@ import pytest
 import torch
 
 import occlusion_fer.torch_data as torch_data_module
+import occlusion_fer.augmentations as augmentations_module
+from occlusion_fer.config import AugmentationConfig
 from occlusion_fer.data import Fer2013Data, Fer2013Record, Fer2013Split
 from occlusion_fer.torch_data import (
     Fer2013TorchDataset,
@@ -126,6 +128,217 @@ def test_image_pixels_are_scaled_to_zero_one_range() -> None:
     assert image.min().item() >= 0.0
     assert image.max().item() <= 1.0
     assert torch.unique(image[0]).numel() > 1
+
+
+def mild_augmentation() -> AugmentationConfig:
+    return AugmentationConfig(
+        type="mild_affine",
+        horizontal_flip_probability=0.5,
+        affine_probability=0.5,
+        degrees=7.0,
+        translate=(0.05, 0.05),
+        scale=(0.97, 1.03),
+        interpolation="bilinear",
+        fill=0.0,
+    )
+
+
+def test_none_augmentation_matches_preprocessing_and_consumes_no_rng() -> None:
+    dataset = Fer2013TorchDataset(
+        make_data(), split="train", normalize_imagenet=False
+    )
+    torch.manual_seed(1234)
+    before = torch.get_rng_state()
+    image, label, sample_id = dataset[0]
+    after = torch.get_rng_state()
+
+    source = torch.from_numpy(make_data().records[0].image).float() / 255.0
+    expected = torch.nn.functional.interpolate(
+        source.view(1, 1, 48, 48),
+        size=(112, 112),
+        mode="bilinear",
+        align_corners=False,
+    ).view(1, 112, 112).expand(3, -1, -1).contiguous()
+    assert torch.equal(before, after)
+    assert torch.equal(image, expected)
+    assert label == 0
+    assert sample_id == 101
+
+
+def test_mild_augmentation_applies_only_to_training_and_preserves_metadata() -> None:
+    config = mild_augmentation()
+    data = make_data()
+    source_before = data.records[0].image.copy()
+    train = Fer2013TorchDataset(data, split="train", augmentation=config)
+    validation = Fer2013TorchDataset(
+        data, split="validation", augmentation=config
+    )
+    test = Fer2013TorchDataset(data, split="test", augmentation=config)
+
+    torch.manual_seed(7)
+    train_image, train_label, train_id = train[0]
+    validation_first = validation[0][0]
+    validation_second = validation[0][0]
+    test_first = test[0][0]
+    test_second = test[0][0]
+
+    assert train_image.shape == (3, 112, 112)
+    assert train_image.dtype == torch.float32
+    assert torch.isfinite(train_image).all().item()
+    assert train_label == 0 and train_id == 101
+    assert torch.equal(validation_first, validation_second)
+    assert torch.equal(test_first, test_second)
+    assert np.array_equal(data.records[0].image, source_before)
+
+
+def test_mild_affine_parameters_stay_within_locked_ranges(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = mild_augmentation()
+    calls = iter([0.99, 0.0, 1.0, 0.0, 1.0, 1.0])
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        augmentations_module,
+        "_draw_unit_interval",
+        lambda: next(calls),
+    )
+
+    def record_affine(image: torch.Tensor, *args: object, **kwargs: object) -> torch.Tensor:
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return image
+
+    monkeypatch.setattr(augmentations_module.F, "affine", record_affine)
+    augmentation = augmentations_module.MildAffineAugmentation(config)
+    image = torch.zeros(1, 112, 112, dtype=torch.float32)
+
+    output = augmentation(image)
+
+    assert output is image
+    args = captured["args"]
+    kwargs = captured["kwargs"]
+    assert args[0] == 7.0
+    assert args[1] == [-5, 5]
+    assert args[2] == pytest.approx(1.03)
+    assert kwargs["interpolation"] == augmentations_module.InterpolationMode.BILINEAR
+    assert kwargs["fill"] == 0.0
+
+
+def test_flip_probability_controls_horizontal_flip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = mild_augmentation()
+    calls = iter([0.0, 0.99])
+    monkeypatch.setattr(
+        augmentations_module,
+        "_draw_unit_interval",
+        lambda: next(calls),
+    )
+    augmentation = augmentations_module.MildAffineAugmentation(config)
+    image = torch.arange(16, dtype=torch.float32).view(1, 4, 4)
+
+    output = augmentation(image)
+
+    assert torch.equal(output, torch.flip(image, dims=(-1,)))
+
+
+def test_affine_probability_controls_affine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = AugmentationConfig(
+        type="mild_affine",
+        horizontal_flip_probability=0.0,
+        affine_probability=0.5,
+        degrees=7.0,
+        translate=(0.05, 0.05),
+        scale=(0.97, 1.03),
+        interpolation="bilinear",
+        fill=0.0,
+    )
+    calls = iter([0.99, 0.99])
+    monkeypatch.setattr(
+        augmentations_module,
+        "_draw_unit_interval",
+        lambda: next(calls),
+    )
+
+    def fail_affine(*args: object, **kwargs: object) -> torch.Tensor:
+        del args, kwargs
+        raise AssertionError("affine should not run when probability misses")
+
+    monkeypatch.setattr(augmentations_module.F, "affine", fail_affine)
+    image = torch.arange(16, dtype=torch.float32).view(1, 4, 4)
+
+    output = augmentations_module.MildAffineAugmentation(config)(image)
+
+    assert torch.equal(output, image)
+
+
+def test_flip_precedes_affine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    calls = iter([0.0, 0.0, 0.5, 0.5, 0.5, 0.5])
+    monkeypatch.setattr(
+        augmentations_module,
+        "_draw_unit_interval",
+        lambda: next(calls),
+    )
+
+    def record_flip(image: torch.Tensor) -> torch.Tensor:
+        events.append("flip")
+        return image
+
+    def record_affine(
+        image: torch.Tensor, *args: object, **kwargs: object
+    ) -> torch.Tensor:
+        del args, kwargs
+        events.append("affine")
+        return image
+
+    monkeypatch.setattr(augmentations_module.F, "hflip", record_flip)
+    monkeypatch.setattr(augmentations_module.F, "affine", record_affine)
+
+    augmentations_module.MildAffineAugmentation(mild_augmentation())(
+        torch.zeros(1, 112, 112, dtype=torch.float32)
+    )
+
+    assert events == ["flip", "affine"]
+
+
+def test_resize_runs_before_augmentation_and_normalization_runs_after(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[str, tuple[int, ...]]] = []
+    original_interpolate = torch_data_module.F.interpolate
+
+    def record_interpolate(image: torch.Tensor, *args: object, **kwargs: object) -> torch.Tensor:
+        events.append(("resize", tuple(image.shape)))
+        return original_interpolate(image, *args, **kwargs)
+
+    def replace_with_half(self: object, image: torch.Tensor) -> torch.Tensor:
+        del self
+        events.append(("augmentation", tuple(image.shape)))
+        return torch.full_like(image, 0.5)
+
+    monkeypatch.setattr(torch_data_module.F, "interpolate", record_interpolate)
+    monkeypatch.setattr(
+        augmentations_module.MildAffineAugmentation,
+        "__call__",
+        replace_with_half,
+    )
+
+    image = Fer2013TorchDataset(
+        make_data(),
+        split="train",
+        augmentation=mild_augmentation(),
+        normalize_imagenet=True,
+    )[0][0]
+
+    assert events == [("resize", (1, 1, 48, 48)), ("augmentation", (1, 112, 112))]
+    expected = (torch.tensor([0.5, 0.5, 0.5]) - torch.tensor([0.485, 0.456, 0.406])) / torch.tensor([0.229, 0.224, 0.225])
+    assert torch.allclose(image[:, 0, 0], expected)
 
 
 def test_resize_uses_interpolation_instead_of_nearest_copying() -> None:

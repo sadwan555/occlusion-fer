@@ -7,12 +7,14 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
+import yaml
 from torch import nn
 from torch.nn import functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
 from occlusion_fer.config import (
     AppConfig,
+    AugmentationConfig,
     DatasetConfig,
     EarlyStoppingConfig,
     ModelConfig,
@@ -1056,9 +1058,67 @@ def write_synthetic_training_csv(tmp_path: Path) -> Path:
                 (1, pixels, "Training"),
                 (0, pixels, "PublicTest"),
                 (1, pixels, "PublicTest"),
+                ("not parsed", "not parsed", "PrivateTest"),
             ]
         )
     return csv_path
+
+
+def test_synthetic_e2_training_records_augmentation_and_skips_private_test(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    csv_path = write_synthetic_training_csv(tmp_path)
+    output_directory = tmp_path / "e2-output"
+    original = make_config()
+    config = replace(
+        original,
+        dataset=replace(
+            original.dataset,
+            path=str(csv_path),
+            augmentation=AugmentationConfig(
+                type="mild_affine",
+                horizontal_flip_probability=0.5,
+                affine_probability=0.5,
+                degrees=7.0,
+                translate=(0.05, 0.05),
+                scale=(0.97, 1.03),
+                interpolation="bilinear",
+                fill=0.0,
+            ),
+        ),
+        model=replace(original.model, pretrained=False),
+        training=replace(
+            original.training,
+            epochs=1,
+            batch_size=2,
+            num_workers=0,
+            device="cpu",
+        ),
+        output=replace(original.output, directory=str(output_directory)),
+    )
+    monkeypatch.setattr(
+        "occlusion_fer.train.create_resnet18",
+        lambda **kwargs: make_spatial_model(),
+    )
+
+    run_training(config)
+
+    resolved = yaml.safe_load(
+        (output_directory / "resolved_config.yaml").read_text(encoding="utf-8")
+    )
+    history = json.loads(
+        (output_directory / "history.json").read_text(encoding="utf-8")
+    )
+    best = torch.load(
+        output_directory / "best.pt", map_location="cpu", weights_only=False
+    )
+    assert resolved["dataset"]["augmentation"]["type"] == "mild_affine"
+    assert resolved["dataset"]["augmentation"]["degrees"] == pytest.approx(7.0)
+    assert len(history) == 1
+    assert history[0]["learning_rate"] == pytest.approx(0.0001)
+    assert "train_accuracy" in history[0]
+    assert best["epoch"] == 1
 
 
 def make_spatial_model() -> nn.Module:

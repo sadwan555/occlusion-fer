@@ -11,6 +11,8 @@ from torch import Tensor
 from torch.nn import functional as F
 from torch.utils.data import DataLoader, Dataset
 
+from occlusion_fer.augmentations import build_augmentation
+from occlusion_fer.config import AugmentationConfig
 from occlusion_fer.data import Fer2013Data, Fer2013Record, Fer2013Split
 
 
@@ -39,6 +41,7 @@ class Fer2013TorchDataset(Dataset[TorchSample]):
         split: str,
         image_size: int = 112,
         normalize_imagenet: bool = False,
+        augmentation: AugmentationConfig | None = None,
     ) -> None:
         if split not in VALID_SPLITS:
             allowed = ", ".join(VALID_SPLITS)
@@ -52,6 +55,10 @@ class Fer2013TorchDataset(Dataset[TorchSample]):
         self.split = cast(Fer2013Split, split)
         self.image_size = image_size
         self.normalize_imagenet = normalize_imagenet
+        self._augmentation = build_augmentation(
+            split=self.split,
+            config=augmentation,
+        )
         self._records = tuple(
             record for record in data.records if record.split == self.split
         )
@@ -64,7 +71,10 @@ class Fer2013TorchDataset(Dataset[TorchSample]):
     def __getitem__(self, index: int) -> TorchSample:
         record = self._records[index]
         image = _record_to_tensor(
-            record, self.image_size, self.normalize_imagenet
+            record,
+            self.image_size,
+            self.normalize_imagenet,
+            self._augmentation,
         )
         return image, record.label, record.sample_id
 
@@ -107,6 +117,7 @@ def _record_to_tensor(
     record: Fer2013Record,
     image_size: int,
     normalize_imagenet: bool,
+    augmentation: object = None,
 ) -> Tensor:
     if record.image.shape != (48, 48):
         raise TorchDataError(
@@ -127,6 +138,21 @@ def _record_to_tensor(
         mode="bilinear",
         align_corners=False,
     ).view(1, image_size, image_size)
+    if augmentation is not None:
+        image = augmentation(image)
+        if tuple(image.shape) != (1, image_size, image_size):
+            raise TorchDataError(
+                f"sample {record.sample_id} augmentation changed image shape to "
+                f"{tuple(image.shape)}"
+            )
+        if image.dtype != torch.float32:
+            raise TorchDataError(
+                f"sample {record.sample_id} augmentation changed image dtype"
+            )
+        if not torch.isfinite(image).all().item():
+            raise TorchDataError(
+                f"sample {record.sample_id} augmented image is non-finite"
+            )
     image = image.expand(3, -1, -1).contiguous()
     if normalize_imagenet:
         image = (image - _IMAGENET_MEAN_TENSOR) / _IMAGENET_STD_TENSOR

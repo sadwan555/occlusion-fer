@@ -289,6 +289,71 @@ python -c 'import pathlib,yaml; paths=[pathlib.Path(p) for p in ("/home/ucla/ans
 python -c 'import json,pathlib; root=pathlib.Path("/home/ucla/anson-fer/results/screening"); e0=json.loads((root/"e0_baseline/seed2026/validation/best_metrics.json").read_text()); e1=json.loads((root/"e1_warmup_cosine/seed2026/validation/best_metrics.json").read_text()); print("E0", e0["accuracy"], e0["macro_f1"]); print("E1", e1["accuracy"], e1["macro_f1"]); print("macro_f1_delta", e1["macro_f1"]-e0["macro_f1"]); print("passes_tolerance", e1["macro_f1"] >= e0["macro_f1"]-0.0030)'
 ```
 
+## 8.1 E2 mild augmentation screening
+
+E2 只在 Training split 应用锁定的轻量增强，PublicTest 保持确定性的 clean
+预处理。增强参数写入
+`configs/experiments/fer2013_resnet18_e2_mild_augmentation.yaml`：水平翻转和
+仿射变换概率均为 `0.5`，旋转 `±7°`，平移上限为图像尺寸的 `5%`，缩放范围
+`[0.97, 1.03]`，bilinear 插值，填充值 `0.0`。E2 的 scheduler 为 `none`，其余
+训练预算、模型、优化器、checkpoint 指标和 seed 与 E0 相同。
+
+E2 直接比较必须在包含 E2 的新 commit 上先重新运行一个全新的 E0-control，
+再运行 E2。旧 commit 的 E0 结果只能作为一致性参考，不能作为正式配对对照：
+
+```bash
+export FER_E2_SCREENING_ROOT="${FER_WORK_ROOT}/results/screening-<E2_COMMIT_SHORT>"
+export FER_E2_LOGS="${FER_E2_SCREENING_ROOT}/logs"
+export FER_E2_PREFLIGHT="${FER_E2_SCREENING_ROOT}/preflight"
+export FER_E2_CONTROL_RUN="${FER_E2_SCREENING_ROOT}/e0_control/seed2026"
+export FER_E2_RUN="${FER_E2_SCREENING_ROOT}/e2_mild_augmentation/seed2026"
+mkdir -p "${FER_E2_LOGS}" "${FER_E2_PREFLIGHT}"
+
+git status --short
+git rev-parse HEAD
+sha256sum configs/experiments/fer2013_resnet18_e0_baseline.yaml \
+  configs/experiments/fer2013_resnet18_e2_mild_augmentation.yaml
+```
+
+开始前两个 run 目录必须不存在；如果存在，停止并换用新的结果根目录。严格
+顺序执行 E0-control 的 preflight 和训练，确认其产物完整后再执行 E2 的 preflight
+和训练。命令只请求 Training 与 PublicTest，且不要调用 `final_evaluate`：
+
+```bash
+python -m occlusion_fer.preflight \
+  --config configs/experiments/fer2013_resnet18_e0_baseline.yaml \
+  --data-path "${FER_DATA_CSV}" \
+  --output-dir "${FER_E2_PREFLIGHT}/e0-control-seed2026" \
+  --device cuda --batch-size 128 \
+  2>&1 | tee "${FER_E2_LOGS}/e0-control-seed2026-preflight.log"
+
+python -m occlusion_fer.train \
+  --config configs/experiments/fer2013_resnet18_e0_baseline.yaml \
+  --data-path "${FER_DATA_CSV}" \
+  --output-dir "${FER_E2_CONTROL_RUN}" \
+  --seed 2026 --device cuda --batch-size 128 --num-workers 4 --amp \
+  2>&1 | tee "${FER_E2_LOGS}/e0-control-seed2026-train.log"
+
+python -m occlusion_fer.preflight \
+  --config configs/experiments/fer2013_resnet18_e2_mild_augmentation.yaml \
+  --data-path "${FER_DATA_CSV}" \
+  --output-dir "${FER_E2_PREFLIGHT}/e2-seed2026" \
+  --device cuda --batch-size 128 \
+  2>&1 | tee "${FER_E2_LOGS}/e2-seed2026-preflight.log"
+
+python -m occlusion_fer.train \
+  --config configs/experiments/fer2013_resnet18_e2_mild_augmentation.yaml \
+  --data-path "${FER_DATA_CSV}" \
+  --output-dir "${FER_E2_RUN}" \
+  --seed 2026 --device cuda --batch-size 128 --num-workers 4 --amp \
+  2>&1 | tee "${FER_E2_LOGS}/e2-seed2026-train.log"
+```
+
+Both runs must have `status: completed`, 30 epochs, `best.pt`, `last.pt`, and
+PublicTest validation artifacts, with no `final_test` directory or PrivateTest
+counts/metrics. Compare raw `validation/best_metrics.json` values only after both
+runs finish. This screening stage does not run E3/E4 or any PrivateTest evaluation.
+
 ## 9. 三种子正式 clean 训练
 
 开始前再次确认 Git 干净，并记录环境。不要使用 `max-*-samples`：

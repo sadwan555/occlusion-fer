@@ -409,6 +409,7 @@ def _run_training(
         split="train",
         image_size=config.dataset.image_size,
         normalize_imagenet=True,
+        augmentation=config.dataset.augmentation,
     )
     validation_dataset = Fer2013TorchDataset(
         data,

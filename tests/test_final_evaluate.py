@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from occlusion_fer.config import load_config
+from occlusion_fer.config import AugmentationConfig, load_config
 from occlusion_fer.final_evaluate import (
     load_checkpoint_model_state,
     parse_args,
@@ -159,7 +159,14 @@ def test_final_evaluation_uses_only_private_test_and_writes_artifacts(
     csv_path = write_artificial_csv(tmp_path)
     output = tmp_path / "run"
     config = load_config(write_config(tmp_path, csv_path, output))
-    config = replace(config, output=replace(config.output, directory=str(output)))
+    config = replace(
+        config,
+        dataset=replace(
+            config.dataset,
+            augmentation=AugmentationConfig(type="mild_affine"),
+        ),
+        output=replace(config.output, directory=str(output)),
+    )
     model = create_resnet18(num_classes=7, pretrained=False)
     checkpoint_path = tmp_path / "best.pt"
     torch.save({"model_state_dict": model.state_dict()}, checkpoint_path)

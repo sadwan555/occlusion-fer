@@ -264,8 +264,27 @@ def test_preflight_does_not_parse_or_report_private_test(
         writer.writeheader()
         writer.writerows(rows)
 
+    config_path = write_config(tmp_path, data_path=str(csv_path))
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "  num_classes: 7\n",
+            """  num_classes: 7
+  augmentation:
+    type: mild_affine
+    horizontal_flip_probability: 0.5
+    affine_probability: 0.5
+    degrees: 7.0
+    translate: [0.05, 0.05]
+    scale: [0.97, 1.03]
+    interpolation: bilinear
+    fill: 0.0
+""",
+            1,
+        ),
+        encoding="utf-8",
+    )
     args = parse_args(
-        write_config(tmp_path, data_path=str(csv_path)),
+        config_path,
         "--device",
         "cpu",
         "--skip-model-forward",
