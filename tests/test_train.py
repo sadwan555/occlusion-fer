@@ -1,4 +1,5 @@
 import csv
+import inspect
 import json
 import random
 from dataclasses import asdict, replace
@@ -285,6 +286,24 @@ def test_train_accuracy_uses_samples_not_unweighted_batch_means() -> None:
     assert result.sample_count == 5
     assert result.accuracy == pytest.approx(3.0 / 5.0)
     assert result.average_loss == pytest.approx(expected_loss)
+def test_train_one_epoch_remains_clean_without_epoch_or_occlusion_inputs() -> None:
+    parameters = inspect.signature(train_one_epoch).parameters
+    source = inspect.getsource(train_module.train_one_epoch)
+
+    assert tuple(parameters) == (
+        "model",
+        "loader",
+        "optimizer",
+        "device",
+        "criterion",
+        "amp_enabled",
+        "scaler",
+    )
+    assert "epoch" not in parameters
+    assert "occlusion" not in source
+    assert "mask" not in source
+    assert "manifest" not in source
+    assert "training_mean" not in source
 
 
 def test_train_one_epoch_optimizer_step_changes_parameters() -> None:
@@ -938,15 +957,79 @@ def test_artificial_fer_resnet_full_training_chain(tmp_path: Path) -> None:
         device=torch.device("cpu"),
         resolved_config=asdict(make_config()),
     )
+    gradients = [
+        parameter.grad
+        for parameter in model.parameters()
+        if parameter.grad is not None
+    ]
+    fixed_input = torch.linspace(
+        -1.0,
+        1.0,
+        steps=3 * 112 * 112,
+        dtype=torch.float32,
+    ).reshape(1, 3, 112, 112)
+    with torch.inference_mode():
+        output_before_reload = model.eval()(fixed_input)
+    payload = torch.load(
+        checkpoint_path,
+        map_location="cpu",
+        weights_only=False,
+    )
+    reloaded_model = create_resnet18(
+        num_classes=7,
+        pretrained=False,
+    ).eval()
+    incompatible = reloaded_model.load_state_dict(
+        payload["model_state_dict"],
+        strict=True,
+    )
+    with torch.inference_mode():
+        output_after_reload = reloaded_model(fixed_input)
 
     assert training_result.sample_count == 2
     assert validation_result.sample_count == 2
+    assert gradients
+    assert all(torch.isfinite(gradient).all() for gradient in gradients)
     assert not torch.equal(before, model.fc.weight)
     assert checkpoint_path == tmp_path.resolve() / "best.pt"
     assert checkpoint_path.is_file()
+    assert set(payload["model_state_dict"]) == set(reloaded_model.state_dict())
+    assert incompatible.missing_keys == []
+    assert incompatible.unexpected_keys == []
+    torch.testing.assert_close(output_before_reload, output_after_reload)
 
 
-def test_run_training_saves_best_last_and_history(tmp_path: Path) -> None:
+def test_run_training_saves_best_last_and_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import occlusion_fer.mask_manifest as manifest_module
+    import occlusion_fer.occlusion as occlusion_module
+    import occlusion_fer.training_mean as training_mean_module
+
+    def forbidden_call(*args: object, **kwargs: object) -> None:
+        raise AssertionError("clean smoke training must not use Stage A masking")
+
+    monkeypatch.setattr(
+        occlusion_module,
+        "apply_training_batch",
+        forbidden_call,
+    )
+    monkeypatch.setattr(
+        occlusion_module,
+        "apply_evaluation_batch",
+        forbidden_call,
+    )
+    monkeypatch.setattr(
+        training_mean_module,
+        "load_training_mean_artifact",
+        forbidden_call,
+    )
+    monkeypatch.setattr(
+        manifest_module,
+        "generate_manifest_rows",
+        forbidden_call,
+    )
     csv_path = tmp_path / "fer2013.csv"
     pixels = " ".join(["128"] * (48 * 48))
     rows = [

@@ -1,0 +1,16 @@
+occlusion:
+  algorithm_version: occlusion-v1
+  mean_algorithm_version: training-mean-v1
+  manifest_schema_version: 1
+  dataset_name: fer2013
+  image_size: 112
+  types:
+    - upper_face
+    - lower_face
+    - random_rectangle
+  ratios:
+    - 0.20
+    - 0.30
+    - 0.40
+  fill_source: training_split_global_mean
+  evaluation_mask_seed: 20260804
