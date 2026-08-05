@@ -1,0 +1,26 @@
+pdf.fonttype: 42
+ps.fonttype: 42
+svg.fonttype: none
+axes.unicode_minus: false
+savefig.bbox: tight
+figure.facecolor: white
+axes.facecolor: white
+axes.edgecolor: 0.2
+axes.labelcolor: 0.15
+xtick.color: 0.15
+ytick.color: 0.15
+text.color: 0.15
+grid.color: 0.82
+grid.linewidth: 0.55
+grid.alpha: 0.75
+axes.grid: False
+axes.axisbelow: True
+axes.titlesize: 10
+axes.labelsize: 9
+xtick.labelsize: 8
+ytick.labelsize: 8
+legend.fontsize: 8
+font.family: sans-serif
+font.sans-serif: DejaVu Sans
+lines.solid_capstyle: round
+lines.dash_capstyle: round
