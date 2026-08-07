@@ -41,6 +41,8 @@ src/occlusion_fer/        数据、模型、训练、评估和产物代码
 tests/                    自动测试
 docs/experiment_protocol.md 当前唯一正式实验协议
 docs/server_runbook.md    完整 HIVE 部署、排错和实验规范
+docs/paper_figure_runbook.md 论文图表导出与 provenance 核验
+scripts/paper/            只读转换正式产物的论文导出 CLI
 SERVER_RUN.md             五分钟服务器快速开始
 ```
 
@@ -89,6 +91,13 @@ YAML 中的 combined CSV、Training mean 和 PublicTest manifest 路径均已解
 
 服务器上的完整顺序、三种子命令、输出解释和故障处理见
 [`docs/server_runbook.md`](docs/server_runbook.md)。
+
+论文数据示例、正式 v2 遮挡示例和六 run 跨 seed 汇总使用
+`scripts/paper/export_fer2013_examples.py`、
+`scripts/paper/export_occlusion_examples.py` 和
+`scripts/paper/export_formal_results.py`。这些入口只生成论文辅助产物，不运行训练或
+推理；完整参数、PrivateTest 边界和 provenance 核验见
+[`docs/paper_figure_runbook.md`](docs/paper_figure_runbook.md)。
 
 ## 论文可用产物
 

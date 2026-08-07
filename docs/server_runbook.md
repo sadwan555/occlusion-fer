@@ -916,9 +916,10 @@ evaluation_provenance.json
 | 错误分析 | `conditions/<condition>/<condition>_predictions.csv` | 按 sample ID 追踪正确性、置信度和七类概率 |
 
 图表应由 CSV/JSON 自动生成，保留脚本和输入 commit；不要把图中数值手工录入。
-所有 seed 都必须报告，不能只选择最高分。当前阶段尚未提供跨种子汇总和绘图
-脚本，后续应在遮挡实验设计锁定后统一实现，以确保 clean/occluded 使用同一
-统计口径和图形模板。
+所有 seed 都必须报告，不能只选择最高分。跨种子汇总和绘图使用独立论文工具分支
+中的 `scripts/paper/export_formal_results.py`；命令、输入门禁、输出和 provenance
+核验见 `docs/paper_figure_runbook.md`。该工具只转换已经完成的正式产物，不参与训练、
+推理、checkpoint 选择或 mask 生成。
 
 ## 12. 失败处理与常见问题
 

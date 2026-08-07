@@ -8,8 +8,9 @@
 
 当前方法口径以 [`experiment_protocol.md`](experiment_protocol.md) 为准。E0-E7
 seed-2026 screening、occlusion-v1/112、synthetic 和 smoke 产物均不能填入正式
-Results。Stage 8 mixed training 尚未开始，所有遮挡与 clean-versus-mixed 正式结果
-位置保持 `[待填：Stage 8]`；三组 locked clean checkpoint 不得重训或覆盖。
+Results。Stage 8 mixed training 正在锁定协议下执行，所有尚未完成的遮挡与
+clean-versus-mixed 正式结果位置保持 `[待填：Stage 8]`；三组 locked clean
+checkpoint 不得重训或覆盖。
 
 全文使用“FER2013 dataset-defined facial-expression label classification”等准确
 表述。不要写模型识别了真实内在情绪、困惑、理解程度、参与度或学习效果；
@@ -161,11 +162,11 @@ FER2013 类别不均衡、合成遮挡与真实遮挡差异、单 backbone、固
 | 编号 | 推荐图表 | 直接输入 | 当前状态 |
 |---|---|---|---|
 | Figure 1 | 实验 pipeline 框架图 | 方法配置与 split 规则 | 可先画结构，结果节点待填 |
-| Figure 2 | 三类遮挡 × 三 ratio 示例网格 | 固定 v2 mask 产物 | `[待填：Stage 8]` |
-| Figure 3 | train/validation loss 与 validation macro-F1 曲线 | 六个正式 run 的 `history.csv` | `[待填：Stage 8]` |
-| Figure 4 | clean confusion matrix | `conditions/clean/clean_confusion_matrix.csv` | `[待填：Stage 8]` |
-| Figure 5 | 各遮挡条件 accuracy/macro-F1 与 clean drop | 正式跨 seed 汇总 CSV | `[待填：Stage 8]` |
-| Figure 6 | 各类别在遮挡下的 F1 变化 | `conditions/*/*_per_class_metrics.csv` | `[待填：Stage 8]` |
+| Figure 2 | 三类遮挡 × 三 ratio 示例网格 | 固定 v2 mask 产物 | 导出工具已实现；真实图片待 HIVE |
+| Figure 3 | train/validation loss 与 validation macro-F1 曲线 | 六个正式 run 的 `history.csv` | 导出工具已实现；正式结果待 HIVE |
+| Figure 4 | clean confusion matrix | `conditions/clean/clean_confusion_matrix.csv` | 导出工具已实现；正式结果待 HIVE |
+| Figure 5 | 各遮挡条件 accuracy/macro-F1 与 clean drop | 正式跨 seed 汇总 CSV | 导出工具已实现；正式结果待 HIVE |
+| Figure 6 | 各类别在遮挡下的 F1 变化 | `conditions/*/*_per_class_metrics.csv` | 汇总 CSV 工具已实现；正式结果待 HIVE |
 | Table 1 | 数据、模型与训练设置 | formal `resolved_config.yaml`、metadata | 配置已锁定，运行证据待填 |
 | Table 2 | clean 三 seed 与 mean±std | formal clean condition metrics | `[待填：Stage 8]` |
 | Table 3 | clean-only 十条件结果 | formal condition metrics | `[待填：Stage 8]` |
