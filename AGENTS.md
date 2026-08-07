@@ -112,9 +112,11 @@ generalization from the first-version experiments.
 - Use fixed PublicTest evaluation seed 20260804 and a validated v2 manifest.
 - Stage B may route the official combined FER2013 CSV by its `Usage` field,
   exactly as the locked E7 baseline loader does.
-- For excluded PrivateTest rows, inspect only the `Usage` value needed for
-  routing; do not parse labels or pixels, materialize records, compute hashes,
-  generate masks, train, or evaluate.
+- A CSV reader may lexically tokenize an excluded PrivateTest row, but only its
+  `Usage` field may be semantically inspected for routing. Do not parse its
+  emotion or pixels into labels/images; validate or materialize it as a record
+  or tensor; include it in Training/PublicTest hashes; or use it for training,
+  validation, checkpoint selection, mask generation, evaluation, or metrics.
 
 ## Output rules
 

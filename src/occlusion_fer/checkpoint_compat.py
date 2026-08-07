@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -12,6 +13,10 @@ from torch import Tensor, nn
 
 class CheckpointCompatibilityError(ValueError):
     """Raised when a checkpoint lacks the metadata required by its route."""
+
+
+_SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
+_STAGE_B_ROUTING_VERSION = "combined-usage-routing-v1"
 
 
 def load_checkpoint_payload(
@@ -109,6 +114,32 @@ def validate_checkpoint_for_route(
         raise CheckpointCompatibilityError("masked route requires clean or mixed training mode")
     if route == "mixed" and training.get("mode") != "mixed":
         raise CheckpointCompatibilityError("mixed route requires training.mode=mixed")
+    if training.get("mode") == "mixed":
+        _validate_stage_b_runtime_provenance(resolved.get("occlusion_runtime"))
+
+
+def _validate_stage_b_runtime_provenance(value: object) -> None:
+    if not isinstance(value, Mapping):
+        raise CheckpointCompatibilityError(
+            "mixed checkpoint requires occlusion_runtime provenance"
+        )
+    for field_name in (
+        "training_mean_sha256",
+        "training_dataset_sha256",
+        "publictest_dataset_sha256",
+    ):
+        field_value = value.get(field_name)
+        if (
+            type(field_value) is not str
+            or _SHA256_PATTERN.fullmatch(field_value) is None
+        ):
+            raise CheckpointCompatibilityError(
+                f"mixed checkpoint occlusion_runtime.{field_name} must be lowercase SHA-256"
+            )
+    if value.get("source_routing_version") != _STAGE_B_ROUTING_VERSION:
+        raise CheckpointCompatibilityError(
+            "mixed checkpoint occlusion_runtime source routing identity is incompatible"
+        )
 
 
 def checkpoint_provenance(

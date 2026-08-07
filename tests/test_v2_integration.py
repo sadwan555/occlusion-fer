@@ -205,7 +205,9 @@ def test_evaluator_writes_ten_condition_artifacts_and_paired_drops(tmp_path) -> 
         labels,
         sample_ids,
         torch.device("cpu"),
-        fill_vector=(0.0, 0.0, 0.0),
+        training_mean_artifact=mean,
+        training_dataset_sha256=splits.training.dataset_sha256,
+        publictest_dataset_sha256=splits.publictest.dataset_sha256,
         manifest_rows=rows,
         manifest_envelope=envelope,
         checkpoint_payload={
@@ -288,6 +290,85 @@ def test_v2_routes_reject_private_and_old_checkpoint_identity() -> None:
             },
             route="masked",
         )
+
+
+def test_mixed_checkpoint_route_requires_stage_b_runtime_provenance() -> None:
+    base = {
+        "model_state_dict": {"synthetic": torch.zeros(1)},
+        "resolved_config": {
+            "dataset": {"image_size": 224},
+            "training": {"mode": "mixed"},
+            "occlusion": {
+                "protocol": {
+                    "algorithm_version": "occlusion-v2-224",
+                    "mean_algorithm_version": "training-mean-v2",
+                    "image_size": 224,
+                },
+            },
+        },
+    }
+    with pytest.raises(CheckpointCompatibilityError, match="occlusion_runtime"):
+        validate_checkpoint_for_route(base, route="mixed")
+    with pytest.raises(CheckpointCompatibilityError, match="occlusion_runtime"):
+        validate_checkpoint_for_route(base, route="masked")
+
+    runtime = dict(base)
+    runtime["resolved_config"] = {
+        **base["resolved_config"],
+        "occlusion_runtime": {
+            "training_mean_sha256": "a" * 64,
+            "training_dataset_sha256": "b" * 64,
+            "publictest_dataset_sha256": "c" * 64,
+            "source_routing_version": "combined-usage-routing-v1",
+        },
+    }
+    validate_checkpoint_for_route(runtime, route="mixed")
+    validate_checkpoint_for_route(runtime, route="masked")
+
+
+@pytest.mark.parametrize(
+    ("field_name", "invalid_value", "error_match"),
+    (
+        ("training_mean_sha256", "not-a-sha", "lowercase SHA-256"),
+        ("training_dataset_sha256", "B" * 64, "lowercase SHA-256"),
+        ("publictest_dataset_sha256", "c" * 63, "lowercase SHA-256"),
+        (
+            "source_routing_version",
+            "combined-usage-routing-v2",
+            "source routing identity",
+        ),
+    ),
+)
+def test_mixed_checkpoint_route_rejects_malformed_runtime_provenance(
+    field_name: str,
+    invalid_value: str,
+    error_match: str,
+) -> None:
+    runtime = {
+        "training_mean_sha256": "a" * 64,
+        "training_dataset_sha256": "b" * 64,
+        "publictest_dataset_sha256": "c" * 64,
+        "source_routing_version": "combined-usage-routing-v1",
+    }
+    runtime[field_name] = invalid_value
+    payload = {
+        "model_state_dict": {"synthetic": torch.zeros(1)},
+        "resolved_config": {
+            "dataset": {"image_size": 224},
+            "training": {"mode": "mixed"},
+            "occlusion": {
+                "protocol": {
+                    "algorithm_version": "occlusion-v2-224",
+                    "mean_algorithm_version": "training-mean-v2",
+                    "image_size": 224,
+                },
+            },
+            "occlusion_runtime": runtime,
+        },
+    }
+
+    with pytest.raises(CheckpointCompatibilityError, match=error_match):
+        validate_checkpoint_for_route(payload, route="mixed")
 
 
 def test_preflight_accepts_combined_path_but_fails_missing_file_before_artifacts() -> None:

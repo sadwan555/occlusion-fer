@@ -20,9 +20,10 @@ ResNet-18，并逐步研究合成面部遮挡对七分类性能的影响。
 - 固定七类顺序：angry、disgust、fear、happy、sad、surprise、neutral；
 - E7 灰度图复制为三通道，bilinear 缩放到 `224×224`，使用 ImageNet normalization；历史 v1/112 代码和产物只作为开发记录；
 - 当前遮挡协议为 `occlusion-v2-224`，仅允许 `upper_face`、`lower_face`、`random_rectangle` 和 `0.20`、`0.30`、`0.40`；
-- Stage B 与 locked E7 baseline 共用 `Usage` 路由：combined CSV 只将
-  Training/PublicTest 解析为样本；PrivateTest 行只检查 `Usage`，其 label/pixels
-  不解析、不进入 split hash、mean、manifest、训练或评估；
+- Stage B 与 locked E7 baseline 共用 `Usage` 路由：CSV reader 会将整行词法读取为
+  字符串字段，但对判定为 PrivateTest 的行只语义检查 `Usage`；其 emotion/pixels
+  不解析为 label/image，不验证或物化为 record/tensor，也不进入 Training/PublicTest
+  hash、mean、manifest、训练、验证、checkpoint 选择、mask 生成、评估或指标；
 - 保存 best/last checkpoint、训练历史、逐类指标、混淆矩阵和逐样本预测；
 - 记录解析后的配置、Git 状态、软件版本、设备和失败信息。
 

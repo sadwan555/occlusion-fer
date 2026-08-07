@@ -68,8 +68,10 @@ git status --short --branch
 git log --oneline --decorate -n 3
 ```
 
-正式运行必须满足：使用自己的账号、GPU 可见、磁盘足够、仓库在 `main`、工作区
-干净且本地与 `origin/main` 同步。发现陌生 GPU 进程时先确认归属，不结束其他
+历史筛选和部署段落使用 `main` 作为初始 checkout；Stage 8 不使用该目录。
+Stage 8 的唯一权威工作树和 `AGENTS.md` 是 integration worktree
+`/home/ucla/anson-fer/project/occlusion-fer-stage-b`，其分支必须是
+`stage-b/e7-occlusion-integration`。发现陌生 GPU 进程时先确认归属，不结束其他
 用户的进程：
 
 ```bash
@@ -140,10 +142,11 @@ CSV 必须包含 `emotion,pixels,Usage`，并保留三个官方 split 名称。
 
 ## 6. Preflight
 
-Stage B 使用与 locked E7 baseline 相同的 `Usage`-first 路由。combined CSV 的
-Training/PublicTest 行会解析为样本；PrivateTest 行只用 `Usage` 判定排除，其
-label/pixels 不解析、不进入 split hash、mean、manifest、训练或评估。CSV parser
-仍必须读取整行文本，不能表述为 PrivateTest row bytes 从未被读取。
+Stage B 使用与 locked E7 baseline 相同的 `Usage`-first 路由。CSV reader 会将整行
+词法读取为字符串字段，但对判定为 PrivateTest 的行只语义检查 `Usage`；其
+emotion/pixels 不解析为 label/image，不验证或物化为 record/tensor，也不进入
+Training/PublicTest hash、mean、manifest、训练、验证、checkpoint 选择、mask
+生成、PublicTest 评估或指标。不能表述为 PrivateTest rows/bytes 从未被读取。
 
 先用一个全新、仓库外目录生成正式 v2 mean/manifest，并生成服务器本地 mixed
 配置。以下命令不手工拆分 CSV，也不修改仓库模板：
@@ -742,6 +745,39 @@ commit；HIVE/Linux 本地测试和 synthetic validation 通过；Usage-routed T
 验证；运行计划和输出根目录已经锁定。若任一 gate 失败，保留证据并停止，不要
 访问 PrivateTest。
 
+Stage 8 的每一组命令都必须从同一个 integration worktree 开始。下面的
+`STAGE8_LOCKED_HEAD` 是故意保留到修复完成、提交并完成 HIVE revalidation 后才
+填写的占位符；仍为占位符时必须停止。
+
+Required final form after revalidation: `STAGE8_LOCKED_HEAD=<FINAL_REVALIDATED_COMMIT>`.
+
+```bash
+export FER_STAGE8_WORKTREE="${FER_WORK_ROOT}/project/occlusion-fer-stage-b"
+export STAGE8_LOCKED_HEAD="FINAL_REVALIDATED_COMMIT"
+cd "${FER_STAGE8_WORKTREE}"
+pwd
+git branch --show-current
+git rev-parse HEAD
+git status --porcelain=v2 --untracked-files=all
+test "$(pwd)" = "${FER_STAGE8_WORKTREE}" || exit 1
+test "$(git branch --show-current)" = "stage-b/e7-occlusion-integration" || exit 1
+test "${STAGE8_LOCKED_HEAD}" != "FINAL_REVALIDATED_COMMIT" || {
+  echo "STOP: replace STAGE8_LOCKED_HEAD with the final revalidated commit" >&2
+  exit 1
+}
+test "$(git rev-parse HEAD)" = "${STAGE8_LOCKED_HEAD}" || {
+  echo "STOP: Stage 8 HEAD does not match STAGE8_LOCKED_HEAD" >&2
+  exit 1
+}
+test -z "$(git status --porcelain=v2 --untracked-files=all)" || {
+  echo "STOP: Stage 8 worktree is dirty" >&2
+  exit 1
+}
+```
+
+Failure of any path, branch, HEAD, or clean-worktree check blocks Stage 8 before
+data access or training.
+
 开始前记录 Git、环境和 GPU；不要使用 `max-*-samples`：
 
 ```bash
@@ -761,6 +797,11 @@ for FER_SEED in 42 123 2026; do
   sha256sum "${FER_LOCKED_CLEAN_ROOT}/seed${FER_SEED}/best.pt"
 done
 ```
+
+Stage 8 只新增三个 mixed formal training runs。三组 clean E7 checkpoint
+(`seed42`, `seed123`, `seed2026`) are reused as-is for the comparison and later
+evaluation. Do not describe this as six new training runs, and do not write any
+output below the locked clean-result directory.
 
 Stage 8 只新增 mixed。`${FER_MIXED_CONFIG}` 是第 6 节生成的仓库外解析副本；
 每个 seed 使用新的独立目录：
@@ -810,7 +851,28 @@ validation/last_predictions.csv
 逐样本 predictions、paired clean-to-occluded drop 和完整 provenance。该分析不
 能回写 checkpoint 或训练配置。
 
-当前 `occlusion_fer.occlusion_evaluate` 是 PublicTest-only API，没有 PrivateTest
+每个 checkpoint 都必须通过同一个可复现 CLI 入口评价；不要手写 Python 调用或
+改用旧的 clean-only evaluator：
+
+```bash
+PYTHONPATH=src python -m occlusion_fer.occlusion_evaluate \
+  --config "${FER_EVAL_CONFIG}" \
+  --checkpoint "${FER_CHECKPOINT}" \
+  --data-path "${FER_DATA_CSV}" \
+  --training-mean "${FER_TRAINING_MEAN_V2}" \
+  --manifest "${FER_PUBLICTEST_MANIFEST_V2}" \
+  --output-dir "${FER_EVAL_OUTPUT}" \
+  --device cuda --batch-size 128 --num-workers 4 --amp
+```
+
+所有从 source tree 直接执行的 evaluator 命令，包括 `--help` 和 synthetic check，
+都必须使用 `PYTHONPATH=src python -m occlusion_fer.occlusion_evaluate ...`。该命令
+只按 `Usage` 路由 `Training` 与 `PublicTest`；CSV reader 会词法读取整行，但对排除的
+`PrivateTest` 行只语义检查 `Usage`。其 emotion/pixels 不解析为 label/image，不验证
+或物化为 record/tensor，不进入 Training/PublicTest hash、mean、manifest、训练、
+验证、checkpoint 选择、mask 生成、PublicTest 评估或指标；没有 PrivateTest 输出路由。
+
+当前 `occlusion_fer.occlusion_evaluate` 提供 PublicTest-only CLI，没有 PrivateTest
 路由；不要把旧的 `final_evaluate` clean-only 命令当作 v2 最终评估。PrivateTest
 只有在六个 checkpoint SHA-256、v2 artifacts、评估代码和报告计划全部锁定后，才
 由另一个明确批准的最终批次执行一次。当前不要执行任何 PrivateTest 命令。
@@ -827,6 +889,11 @@ conditions/<condition>_paired_drop.csv
 conditions/<condition>_provenance.json
 evaluation_provenance.json
 ```
+
+`evaluation_provenance.json` 在十个 condition 产物全部成功写入后最后生成，是正式
+十条件评价唯一的成功完成标志。目录中若存在 `failure.json`，或只有部分 condition
+文件而没有 `evaluation_provenance.json`，必须判定为未完成；保留诊断证据并改用全新
+输出目录，不能原地重跑或覆盖。
 
 ## 11. 指标定义与论文产物映射
 
