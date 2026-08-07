@@ -8,7 +8,8 @@
 
 当前方法口径以 [`experiment_protocol.md`](experiment_protocol.md) 为准。E0-E7
 seed-2026 screening、occlusion-v1/112、synthetic 和 smoke 产物均不能填入正式
-Results。Stage 8 尚未开始，所有正式结果位置保持 `[待填：Stage 8]`。
+Results。Stage 8 mixed training 尚未开始，所有遮挡与 clean-versus-mixed 正式结果
+位置保持 `[待填：Stage 8]`；三组 locked clean checkpoint 不得重训或覆盖。
 
 全文使用“FER2013 dataset-defined facial-expression label classification”等准确
 表述。不要写模型识别了真实内在情绪、困惑、理解程度、参与度或学习效果；

@@ -20,12 +20,15 @@ ResNet-18，并逐步研究合成面部遮挡对七分类性能的影响。
 - 固定七类顺序：angry、disgust、fear、happy、sad、surprise、neutral；
 - E7 灰度图复制为三通道，bilinear 缩放到 `224×224`，使用 ImageNet normalization；历史 v1/112 代码和产物只作为开发记录；
 - 当前遮挡协议为 `occlusion-v2-224`，仅允许 `upper_face`、`lower_face`、`random_rectangle` 和 `0.20`、`0.30`、`0.40`；
-- Stage B 只接受 Training-only、PublicTest-only 或 permitted-splits artifact；mixed 配置使用显式 `.json` source，combined CSV 在打开前拒绝；
+- Stage B 与 locked E7 baseline 共用 `Usage` 路由：combined CSV 只将
+  Training/PublicTest 解析为样本；PrivateTest 行只检查 `Usage`，其 label/pixels
+  不解析、不进入 split hash、mean、manifest、训练或评估；
 - 保存 best/last checkpoint、训练历史、逐类指标、混淆矩阵和逐样本预测；
 - 记录解析后的配置、Git 状态、软件版本、设备和失败信息。
 
-E0-E7 seed-2026 运行是配方筛选历史，不是正式三种子证据。Stage 8 的三组 clean
-与三组 mixed 正式训练尚未开始；当前没有可报告的 Stage B 正式结果。mixed
+E0-E7 seed-2026 运行是配方筛选历史，不是正式三种子证据。三组 locked E7 clean
+正式 checkpoint 已保留；Stage 8 只新增三组 mixed 正式训练。当前没有可报告的
+Stage B 正式结果。mixed
 clean/occluded training 与十种 PublicTest 条件 evaluator 只在 v2 artifact 身份
 完整时启用；PrivateTest 不属于当前 Stage 6/7 验证范围。
 
@@ -70,9 +73,17 @@ python -m occlusion_fer.train \
 ```
 
 上述命令只展示锁定的 clean 配方；必须先完成干净 commit、HIVE/Linux 验证和
-v2 artifact gate，才能启动 Stage 8。mixed 配置为
+v2 artifact gate，才能启动 Stage 8。先从同一 official CSV 生成 v2 artifacts：
+
+```bash
+python -m occlusion_fer.stage_b_artifacts \
+  --data-path /path/to/fer2013.csv \
+  --output-dir /path/to/new-stage-b-artifacts
+```
+
+mixed 配置为
 `configs/experiments/fer2013_resnet18_e7_occlusion_mixed.yaml`，它要求服务器本地
-YAML 中的 permitted-splits、Training mean 和 PublicTest manifest 路径均已解析并
+YAML 中的 combined CSV、Training mean 和 PublicTest manifest 路径均已解析并
 通过 preflight。当前不要运行 `final_evaluate`，也不要访问 PrivateTest。
 
 服务器上的完整顺序、三种子命令、输出解释和故障处理见
@@ -92,6 +103,7 @@ YAML 中的 permitted-splits、Training mean 和 PublicTest manifest 路径均�
 - `conditions/<condition>/<condition>_confusion_matrix.csv`：混淆矩阵图；
 - `conditions/<condition>/<condition>_predictions.csv`：配对条件比较、错误分析和可追溯样本结果。
 
-这些文件只有在六个 Stage 8 run 按当前协议完成并通过 provenance 校验后才是论文
-候选证据；当前状态为 pending。不要手工改写输出数值，也不要只报告表现最好的
-seed，synthetic、smoke 和 screening 产物不能作为正式结果。
+这些文件只有在三组 locked clean 与 Stage 8 三组 mixed 组成的六个正式 run
+通过 provenance 校验后才是论文候选证据；当前状态为 pending。不要手工改写
+输出数值，也不要只报告表现最好的 seed，synthetic、smoke 和 screening 产物
+不能作为正式结果。

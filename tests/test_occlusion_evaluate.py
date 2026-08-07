@@ -19,7 +19,6 @@ from occlusion_fer.occlusion_evaluate import (
     write_occlusion_evaluation_artifacts,
 )
 from occlusion_fer.permitted_splits import (
-    PermittedSplitError,
     SplitRecord,
     make_permitted_splits,
 )
@@ -84,14 +83,15 @@ def _provenance() -> dict[str, object]:
     }
 
 
-def test_occlusion_evaluator_rejects_combined_source_and_private_route(tmp_path) -> None:
+def test_occlusion_evaluator_accepts_usage_routed_csv_and_rejects_private_route(
+    tmp_path,
+) -> None:
     with pytest.raises(OcclusionEvaluationError, match="PrivateTest"):
         validate_publictest_route(split="PrivateTest", private_test=True)
-    with pytest.raises(PermittedSplitError, match="before opening"):
-        validate_publictest_route(
-            split="PublicTest",
-            dataset_path=tmp_path / "combined.csv",
-        )
+    validate_publictest_route(
+        split="PublicTest",
+        dataset_path=tmp_path / "combined.csv",
+    )
 
 
 def test_masked_evaluator_strict_loads_checkpoint_and_returns_file_identity(tmp_path) -> None:

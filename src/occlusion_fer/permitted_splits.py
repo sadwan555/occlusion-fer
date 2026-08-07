@@ -1,9 +1,4 @@
-"""Strict split-source identities for Stage B occlusion artifacts.
-
-This module deliberately does not accept a combined FER2013 CSV for Stage B.
-The JSON artifact format is small, deterministic, and suitable for synthetic
-fixtures or a separately prepared server-side permitted-splits export.
-"""
+"""Strict Training/PublicTest source identities for Stage B artifacts."""
 
 from __future__ import annotations
 
@@ -11,15 +6,22 @@ import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Sequence
 
 import numpy as np
 
 from occlusion_fer.data import (
     FER2013_LABEL_NAMES,
     Fer2013Data,
+    Fer2013DataError,
     Fer2013Record,
+    load_fer2013_csv,
 )
+
+
+STAGE_B_SOURCE_ROUTING_VERSION = "combined-usage-routing-v1"
+OFFICIAL_TRAINING_SAMPLE_COUNT = 28709
+OFFICIAL_PUBLICTEST_SAMPLE_COUNT = 3589
 
 
 class PermittedSplitError(ValueError):
@@ -115,6 +117,91 @@ def load_permitted_splits(path: str | Path) -> PermittedSplits:
     return make_permitted_splits(training, publictest)
 
 
+def permitted_splits_from_data(data: Fer2013Data) -> PermittedSplits:
+    """Build split identities from an already filtered FER2013 data model."""
+    if not isinstance(data, Fer2013Data):
+        raise PermittedSplitError("data must be a validated Fer2013Data object")
+    if data.test_count != 0:
+        raise PermittedSplitError(
+            "Stage B source data must not materialize PrivateTest records"
+        )
+    training: list[SplitRecord] = []
+    publictest: list[SplitRecord] = []
+    for record in data.records:
+        split_record = SplitRecord(
+            sample_id=record.sample_id,
+            label=record.label,
+            pixels=tuple(int(pixel) for pixel in record.image.reshape(-1)),
+        )
+        if record.split == "train":
+            training.append(split_record)
+        elif record.split == "validation":
+            publictest.append(split_record)
+        else:
+            raise PermittedSplitError(
+                "Stage B source data may contain only Training and PublicTest"
+            )
+    if (
+        len(training) != data.train_count
+        or len(publictest) != data.validation_count
+    ):
+        raise PermittedSplitError("FER2013 split counts do not match loaded records")
+    return make_permitted_splits(training, publictest)
+
+
+def load_stage_b_source(path: str | Path) -> PermittedSplits:
+    """Load a JSON export or route a combined CSV by its official Usage field.
+
+    For CSV input, :func:`load_fer2013_csv` inspects ``Usage`` on every row but
+    parses label and pixel fields only for Training and PublicTest rows.
+    """
+    source_path = Path(path).expanduser()
+    source_kind = stage_b_source_kind(source_path)
+    if source_kind == "permitted_splits_json":
+        return load_permitted_splits(source_path)
+    try:
+        data = load_fer2013_csv(
+            source_path,
+            include_splits=("train", "validation"),
+        )
+    except Fer2013DataError as exc:
+        raise PermittedSplitError(str(exc)) from exc
+    return permitted_splits_from_data(data)
+
+
+def stage_b_source_kind(path: str | Path) -> str:
+    """Validate the portable source suffix without opening the source."""
+    raw_path = str(path)
+    if not raw_path.strip():
+        raise PermittedSplitError("Stage B source path must not be empty")
+    suffix = Path(raw_path).expanduser().suffix.lower()
+    if suffix == ".json":
+        return "permitted_splits_json"
+    if suffix == ".csv":
+        return "combined_csv_usage_routed"
+    raise PermittedSplitError(
+        "Stage B source must be a FER2013 .csv or permitted-splits .json file"
+    )
+
+
+def validate_official_stage_b_sources(splits: PermittedSplits) -> None:
+    """Require the official Training and PublicTest sample counts."""
+    if not isinstance(splits, PermittedSplits):
+        raise PermittedSplitError(
+            "splits must be a validated PermittedSplits object"
+        )
+    if splits.training.count != OFFICIAL_TRAINING_SAMPLE_COUNT:
+        raise PermittedSplitError(
+            "official Training sample count must be "
+            f"{OFFICIAL_TRAINING_SAMPLE_COUNT}; got {splits.training.count}"
+        )
+    if splits.publictest.count != OFFICIAL_PUBLICTEST_SAMPLE_COUNT:
+        raise PermittedSplitError(
+            "official PublicTest sample count must be "
+            f"{OFFICIAL_PUBLICTEST_SAMPLE_COUNT}; got {splits.publictest.count}"
+        )
+
+
 def permitted_splits_to_data(splits: PermittedSplits) -> Fer2013Data:
     """Convert validated split records into the existing tensor-pipeline data model."""
     if not isinstance(splits, PermittedSplits):
@@ -143,34 +230,6 @@ def permitted_splits_to_data(splits: PermittedSplits) -> Fer2013Data:
         validation_count=splits.publictest.count,
         test_count=0,
         class_counts=class_counts,
-    )
-
-
-def is_permitted_splits_artifact_path(path: str | Path) -> bool:
-    """Recognize the explicit JSON source form without opening or hashing it."""
-    return Path(path).expanduser().suffix.lower() == ".json"
-
-
-def reject_combined_dataset_path(
-    dataset_path: str | Path, *, occlusion_enabled: bool
-) -> None:
-    """Reject legacy combined paths before any file open when enabled.
-
-    A permitted-splits JSON is the only path-shaped Stage B source currently
-    accepted by the command-line training/preflight routes. The caller still
-    validates and loads that artifact separately; this guard only prevents a
-    combined CSV from being opened or hashed by an occlusion-enabled route.
-    """
-    if not occlusion_enabled:
-        return
-    raw_path = str(dataset_path)
-    if not raw_path.strip():
-        raise PermittedSplitError("occlusion-enabled runs require explicit split sources")
-    if is_permitted_splits_artifact_path(raw_path):
-        return
-    raise PermittedSplitError(
-        "occlusion-enabled Stage B commands reject dataset.path combined CSV before opening; "
-        "provide Training-only and PublicTest-only sources or a permitted-splits artifact"
     )
 
 

@@ -30,7 +30,7 @@ from occlusion_fer.occlusion import (
     V2_MASKED_CONDITIONS,
     apply_evaluation_batch_v2,
 )
-from occlusion_fer.permitted_splits import reject_combined_dataset_path
+from occlusion_fer.permitted_splits import stage_b_source_kind
 
 
 class OcclusionEvaluationError(RuntimeError):
@@ -71,7 +71,7 @@ def validate_publictest_route(
     if split not in {"validation", "PublicTest"}:
         raise OcclusionEvaluationError("occlusion evaluator requires PublicTest/validation")
     if dataset_path is not None:
-        reject_combined_dataset_path(dataset_path, occlusion_enabled=True)
+        stage_b_source_kind(dataset_path)
     if manifest_algorithm_version != "occlusion-v2-224":
         raise OcclusionEvaluationError("occlusion evaluator requires occlusion-v2-224 manifest")
 

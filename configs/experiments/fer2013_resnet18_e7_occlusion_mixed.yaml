@@ -4,7 +4,7 @@ project:
   run_role: formal_mixed
 dataset:
   name: fer2013
-  path: /path/to/permitted_splits.json
+  path: /path/to/fer2013.csv
   image_size: 224
   num_classes: 7
   permitted_splits: [Training, PublicTest]

@@ -7,8 +7,9 @@ clean/mixed 协议。当前唯一权威协议是
 [`experiment_protocol.md`](experiment_protocol.md)；本手册中的 E0-E7 部分只保留
 筛选过程的历史可追溯性。
 
-当前状态：Stage 8 正式训练尚未开始，PrivateTest 尚未访问。任何 screening、
-smoke、synthetic 或工程验证数值都不是正式论文结果。
+当前状态：Stage 8 mixed 正式训练尚未开始，PrivateTest 尚未访问。三组 locked
+E7 clean checkpoint 已保留；任何 screening、smoke、synthetic 或工程验证数值
+都不是正式论文结果。
 
 项目只预测 FER2013 定义的七个表情标签。不能把结果解释为识别真实内在情绪、
 困惑、理解程度、参与度或学习效果，也不能据此宣称真实世界鲁棒性、跨数据集
@@ -139,9 +140,44 @@ CSV 必须包含 `emotion,pixels,Usage`，并保留三个官方 split 名称。
 
 ## 6. Preflight
 
-Stage 6/7 的遮挡入口只接受分离的 Training-only 与 PublicTest-only source，或
-permitted-splits artifact（mixed 配置的 `dataset.path` 必须指向显式 `.json` artifact）。combined FER2013 CSV 会在打开前拒绝；Stage B 不读取、
-解析、hash 或推理 PrivateTest。
+Stage B 使用与 locked E7 baseline 相同的 `Usage`-first 路由。combined CSV 的
+Training/PublicTest 行会解析为样本；PrivateTest 行只用 `Usage` 判定排除，其
+label/pixels 不解析、不进入 split hash、mean、manifest、训练或评估。CSV parser
+仍必须读取整行文本，不能表述为 PrivateTest row bytes 从未被读取。
+
+先用一个全新、仓库外目录生成正式 v2 mean/manifest，并生成服务器本地 mixed
+配置。以下命令不手工拆分 CSV，也不修改仓库模板：
+
+```bash
+export FER_STAGE_B_ARTIFACTS="${FER_OUTPUT_ROOT}/stage-b-artifacts"
+export FER_MIXED_CONFIG="${FER_STAGE_B_ARTIFACTS}/e7-occlusion-mixed.yaml"
+python -m occlusion_fer.stage_b_artifacts \
+  --data-path "${FER_DATA_CSV}" \
+  --output-dir "${FER_STAGE_B_ARTIFACTS}"
+
+python - <<'PY'
+import os
+from pathlib import Path
+import yaml
+
+template = Path("configs/experiments/fer2013_resnet18_e7_occlusion_mixed.yaml")
+payload = yaml.safe_load(template.read_text(encoding="utf-8"))
+artifact_root = Path(os.environ["FER_STAGE_B_ARTIFACTS"])
+payload["dataset"]["path"] = os.environ["FER_DATA_CSV"]
+payload["occlusion"]["artifacts"]["training_mean"] = str(
+    artifact_root / "training_mean_v2.json"
+)
+payload["occlusion"]["artifacts"]["manifest"] = str(
+    artifact_root / "publictest_manifest_v2.csv"
+)
+Path(os.environ["FER_MIXED_CONFIG"]).write_text(
+    yaml.safe_dump(payload, sort_keys=False), encoding="utf-8"
+)
+PY
+```
+
+`stage_b_artifacts` 要求官方 `28709` Training 和 `3589` PublicTest；已有输出目录
+会失败而不是覆盖。
 
 preflight 检查环境、CSV schema、Training/PublicTest、batch、随机初始化模型
 forward 和输出目录；它在 CSV 读取阶段跳过 PrivateTest 行，不解析其标签、像素、
@@ -161,8 +197,19 @@ python -m occlusion_fer.preflight \
 
 只有末尾出现 `PREFLIGHT PASSED` 才继续。应确认 Training、PublicTest 数量合理，
 输出中没有 `test_samples` 或 `test_class_counts`，E7 clean batch 为 `[N,3,224,224]`，
-logits 为 `[N,7]`。当前不要请求 PrivateTest；它只允许在六个 Stage 8 run、v2
-manifest 和最终报告计划全部锁定后由单独批准的最终批次请求。
+logits 为 `[N,7]`。当前不要请求 PrivateTest；它只允许在三组 locked clean 与
+Stage 8 三组 mixed checkpoint、v2 manifest 和最终报告计划全部锁定后由单独
+批准的最终批次请求。
+
+随后对 mixed 正式配置运行同一 preflight：
+
+```bash
+python -m occlusion_fer.preflight \
+  --config "${FER_MIXED_CONFIG}" \
+  --data-path "${FER_DATA_CSV}" \
+  --output-dir "${FER_OUTPUT_ROOT}/preflight-mixed" \
+  --device cuda --batch-size 128
+```
 
 ## 7. 性能 smoke test
 
@@ -687,11 +734,11 @@ If no candidate reaches PublicTest accuracy `0.70`, record the second round as
 unsuccessful and stop. Do not run formal seeds, access PrivateTest, modify these
 three candidates, or add a new candidate based on the results.
 
-## 9. Stage 8 六个正式 run（当前尚未开始）
+## 9. Stage 8 三个 mixed 正式 run（当前尚未开始）
 
 只有以下 gate 全部通过才可以从服务器启动 Stage 8：集成实现已经形成干净
-commit；HIVE/Linux 本地测试和 synthetic validation 通过；Training-only 与
-PublicTest-only source、Training mean v2 和 PublicTest manifest v2 的身份已经
+commit；HIVE/Linux 本地测试和 synthetic validation 通过；Usage-routed Training
+与 PublicTest source、Training mean v2 和 PublicTest manifest v2 的身份已经
 验证；运行计划和输出根目录已经锁定。若任一 gate 失败，保留证据并停止，不要
 访问 PrivateTest。
 
@@ -704,33 +751,27 @@ python -m pip freeze > "${FER_OUTPUT_ROOT}/environment.txt"
 nvidia-smi > "${FER_OUTPUT_ROOT}/nvidia-smi-before.txt"
 ```
 
-clean 使用 `configs/experiments/fer2013_resnet18_e7_clean.yaml` 和官方 CSV。
-mixed 使用 `configs/experiments/fer2013_resnet18_e7_occlusion_mixed.yaml` 的
-服务器本地解析副本、permitted-splits JSON、Training mean v2 和 PublicTest
-manifest v2；不得把个人路径写回仓库配置。每个 seed 和策略使用新的独立目录：
+首先核验三组 locked E7 clean checkpoint 存在并记录 SHA-256。不要重新训练、
+筛选或覆盖它们：
+
+```bash
+export FER_LOCKED_CLEAN_ROOT="${FER_WORK_ROOT}/results/formal-e7-4cb1e0f"
+for FER_SEED in 42 123 2026; do
+  test -f "${FER_LOCKED_CLEAN_ROOT}/seed${FER_SEED}/best.pt" || exit 1
+  sha256sum "${FER_LOCKED_CLEAN_ROOT}/seed${FER_SEED}/best.pt"
+done
+```
+
+Stage 8 只新增 mixed。`${FER_MIXED_CONFIG}` 是第 6 节生成的仓库外解析副本；
+每个 seed 使用新的独立目录：
 
 ```bash
 set -o pipefail
 for FER_SEED in 42 123 2026; do
-  FER_RUN_OUTPUT="${FER_OUTPUT_ROOT}/formal/clean/seed${FER_SEED}"
-  python -m occlusion_fer.train \
-    --config configs/experiments/fer2013_resnet18_e7_clean.yaml \
-    --data-path "${FER_DATA_CSV}" \
-    --output-dir "${FER_RUN_OUTPUT}" \
-    --seed "${FER_SEED}" --device cuda --amp \
-    2>&1 | tee "${FER_OUTPUT_ROOT}/formal/clean-seed${FER_SEED}.log" || break
-done
-```
-
-只有三个 clean run 全部成功并完成 artifact 检查后，才按同一 seed 顺序运行
-mixed。以下 `${FER_MIXED_CONFIG}` 必须是仓库模板的服务器本地解析副本：
-
-```bash
-for FER_SEED in 42 123 2026; do
   FER_RUN_OUTPUT="${FER_OUTPUT_ROOT}/formal/mixed/seed${FER_SEED}"
   python -m occlusion_fer.train \
     --config "${FER_MIXED_CONFIG}" \
-    --data-path "${FER_PERMITTED_SPLITS}" \
+    --data-path "${FER_DATA_CSV}" \
     --output-dir "${FER_RUN_OUTPUT}" \
     --seed "${FER_SEED}" --device cuda --amp \
     2>&1 | tee "${FER_OUTPUT_ROOT}/formal/mixed-seed${FER_SEED}.log" || break
@@ -758,9 +799,9 @@ validation/last_predictions.csv
 ```
 
 `best.pt` 由 clean PublicTest macro-F1 严格提升决定；masked PublicTest 指标不
-参与选择，PrivateTest 未被训练入口加载。检查六个 `run_metadata.json` 的 `status`
-均为 `completed`、Git commit 相同、`git_dirty` 为 `false`、seed 和
-`training.mode` 分别正确，并核对 clean/mixed 的锁定字段完全一致。
+参与选择，PrivateTest 未被训练入口加载。检查三个 mixed `run_metadata.json` 的
+`status` 均为 `completed`、Git commit 相同、`git_dirty` 为 `false`、seed 和
+`training.mode` 正确；再与三组 locked clean metadata 核对配方字段和证据身份。
 
 ## 10. PublicTest 十条件评估与 PrivateTest 门禁
 

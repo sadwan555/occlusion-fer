@@ -122,11 +122,12 @@ Formal experiments use three seeds:
 - 123
 - 2026
 
-This produces six formal ResNet-18 training runs: three clean-only and three
-mixed.
+The evidence set contains six formal ResNet-18 runs: three locked clean-only
+runs and three mixed runs. Stage 8 adds only the mixed runs; it must not retrain
+or overwrite the locked clean checkpoints.
 
-Stage 8 formal training has not started. The single-seed E7 screening run does
-not count toward these six runs, and no formal Stage B result is currently
+Stage 8 mixed training has not started. E0-E7 screening runs do not count
+toward the formal evidence set, and no formal Stage B result is currently
 available.
 
 ## Evaluation

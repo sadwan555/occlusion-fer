@@ -110,8 +110,11 @@ generalization from the first-version experiments.
 - All compared checkpoints must use the same final evaluation masks.
 - Do not use test labels or test performance to generate masks.
 - Use fixed PublicTest evaluation seed 20260804 and a validated v2 manifest.
-- Reject combined all-splits CSV inputs before opening them on
-  occlusion-enabled Stage B routes.
+- Stage B may route the official combined FER2013 CSV by its `Usage` field,
+  exactly as the locked E7 baseline loader does.
+- For excluded PrivateTest rows, inspect only the `Usage` value needed for
+  routing; do not parse labels or pixels, materialize records, compute hashes,
+  generate masks, train, or evaluate.
 
 ## Output rules
 

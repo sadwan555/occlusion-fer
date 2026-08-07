@@ -16,7 +16,8 @@ require explicit approval before any additional formal run is started.
 - Stage 7 local engineering validation does not constitute research
   performance evidence; HIVE/Linux validation is still required before formal
   server execution.
-- Stage 8 formal training has not started.
+- Stage 8 mixed formal training has not started; three locked E7 clean formal
+  checkpoints are preserved and will not be retrained.
 - No completed Stage B clean-versus-mixed three-seed result exists yet.
 - PrivateTest has not been accessed under this protocol.
 - Smoke, synthetic, unit-test, and artificial-training outputs are engineering
@@ -53,12 +54,15 @@ The official FER2013 split meanings and expected counts are fixed:
 PrivateTest must not be used for recipe selection, hyperparameter tuning,
 checkpoint selection, mask generation, or Stage B integration validation.
 
-Occlusion-enabled Stage B routes accept only a Training-only source, a
-PublicTest-only source, or a validated permitted-splits artifact containing
-exactly those sources. A combined all-splits CSV is rejected before it is
-opened by those routes. Dataset identities are computed separately for
-Training and PublicTest from canonical sample records; PrivateTest content does
-not participate in either identity.
+Occlusion-enabled Stage B routes use source-routing identity
+`combined-usage-routing-v1`. They accept the official combined FER2013 CSV and
+apply the same `Usage`-first filtering as the locked E7 baseline loader, while
+retaining the historical permitted-splits JSON compatibility path. The CSV
+reader necessarily reads each row as transport text, but an excluded
+PrivateTest row is used only to inspect `Usage`: its label and pixels are not
+parsed into typed values, materialized as a dataset record, hashed, used for a
+mean or manifest, trained on, or evaluated. Dataset identities are computed
+separately for Training and PublicTest from selected canonical sample records.
 
 Data paths remain validated YAML values or explicit runtime overrides and must
 never be committed as machine-specific paths. Data, derived images,
@@ -119,7 +123,9 @@ The repository configurations are:
 
 The YAML seed is a reproducible default. Each formal run must override it with
 exactly one member of the formal seed set and use a fresh output directory.
-This yields six formal runs: three clean-only and three mixed.
+The locked clean E7 evidence already contains three formal clean-only runs.
+Stage 8 adds three mixed runs, yielding six formal runs in total without
+retraining or overwriting the clean checkpoints.
 
 Every epoch evaluates the clean PublicTest split. `best.pt` is replaced only
 when clean PublicTest macro-F1 strictly improves; a tie retains the earlier
@@ -221,15 +227,16 @@ no PrivateTest route.
 2. Snapshot the Stage B implementation in a clean, reviewable Git commit.
 3. Complete HIVE/Linux synthetic and test validation without FER2013 inference.
 4. Generate and validate Training/PublicTest v2 source identities, mean, and
-   manifest without reading PrivateTest.
-5. Run the six Stage 8 formal trainings from one locked commit and retain every
-   completed or failed run.
+   manifest without parsing PrivateTest label or pixel fields.
+5. Preserve the three locked E7 clean runs, then run the three Stage 8 mixed
+   trainings from one locked commit and retain every completed or failed run.
 6. Evaluate all six best checkpoints on the same ten PublicTest conditions and
    freeze all provenance.
 7. Only then authorize the single final PrivateTest batch.
 
-At the time of this protocol update, gates 2-7 are not complete. No pending
-result may be represented by a placeholder number.
+The source-routing amendment requires Stage 7 validation to be repeated on
+HIVE before Stage 8 starts. No pending result may be represented by a
+placeholder number.
 
 ## 9. Required run provenance
 

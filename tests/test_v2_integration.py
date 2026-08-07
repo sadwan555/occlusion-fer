@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import json
+import csv
 from pathlib import Path
 
 import torch
@@ -28,10 +28,9 @@ from occlusion_fer.occlusion_evaluate import (
     write_occlusion_evaluation_artifacts,
 )
 from occlusion_fer.permitted_splits import (
-    PermittedSplitError,
     SplitRecord,
     make_permitted_splits,
-    reject_combined_dataset_path,
+    stage_b_source_kind,
 )
 from occlusion_fer.training_mean import (
     calculate_training_mean_v2,
@@ -105,14 +104,11 @@ def test_mixed_train_masks_only_selected_samples_and_records_counts() -> None:
     assert result.sample_count == 4
 
 
-def test_permitted_sources_are_split_specific_and_combined_path_is_refused() -> None:
+def test_permitted_sources_are_split_specific_and_combined_path_is_routed() -> None:
     splits = make_permitted_splits([_record(1, 2)], [_record(2, 3)])
     assert splits.training.dataset_sha256 != splits.publictest.dataset_sha256
-    with pytest.raises(PermittedSplitError, match="before opening"):
-        reject_combined_dataset_path("/path/to/fer2013.csv", occlusion_enabled=True)
-    reject_combined_dataset_path(
-        "/path/to/permitted_splits.json", occlusion_enabled=True
-    )
+    assert stage_b_source_kind("/path/to/fer2013.csv") == "combined_csv_usage_routed"
+    assert stage_b_source_kind("/path/to/permitted_splits.json") == "permitted_splits_json"
 
 
 def test_mean_and_manifest_digests_are_external_to_payload() -> None:
@@ -294,7 +290,7 @@ def test_v2_routes_reject_private_and_old_checkpoint_identity() -> None:
         )
 
 
-def test_preflight_rejects_combined_path_before_opening() -> None:
+def test_preflight_accepts_combined_path_but_fails_missing_file_before_artifacts() -> None:
     result = run_preflight(Namespace(
         config="configs/experiments/fer2013_resnet18_e7_occlusion_mixed.yaml",
         data_path="/path/to/combined-fer2013.csv",
@@ -306,37 +302,30 @@ def test_preflight_rejects_combined_path_before_opening() -> None:
         skip_model_forward=True,
     ))
     assert result.success is False
-    assert result.failed_stage == "configuration"
-    assert "before opening" in (result.error or "")
+    assert result.failed_stage == "data file"
+    assert "does not exist" in (result.error or "")
 
 
-def test_mixed_preflight_consumes_permitted_splits_artifact(tmp_path) -> None:
-    artifact = tmp_path / "permitted_splits.json"
-    record = lambda sample_id, pixel_value: {
-        "sample_id": sample_id,
-        "label": sample_id % 7,
-        "pixels": [pixel_value] * (48 * 48),
-    }
-    artifact.write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "Training": [record(1, 0), record(2, 1)],
-                "PublicTest": [record(3, 2), record(4, 3)],
-            }
-        ),
-        encoding="utf-8",
-    )
+def test_mixed_preflight_consumes_usage_routed_combined_csv(tmp_path) -> None:
+    artifact = tmp_path / "fer2013.csv"
+    with artifact.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, lineterminator="\n")
+        writer.writerow(["emotion", "pixels", "Usage"])
+        writer.writerow([2, " ".join(["0"] * (48 * 48)), "Training"])
+        writer.writerow([3, " ".join(["1"] * (48 * 48)), "Training"])
+        writer.writerow(["NOT PARSED", "DO NOT PARSE", "PrivateTest"])
+        writer.writerow([5, " ".join(["2"] * (48 * 48)), "PublicTest"])
+        writer.writerow([6, " ".join(["3"] * (48 * 48)), "PublicTest"])
     splits = make_permitted_splits(
-        [_record(1, 0), _record(2, 1)],
-        [_record(3, 2), _record(4, 3)],
+        [_record(2, 0), _record(3, 1)],
+        [_record(5, 2), _record(6, 3)],
     )
     mean = calculate_training_mean_v2(splits.training)
     mean_path = tmp_path / "training_mean_v2.json"
     write_training_mean_v2(mean_path, mean)
     mean_sha = training_mean_v2_sha256(mean)
     rows = build_manifest_v2_rows(
-        [3, 4],
+        [5, 6],
         publictest_dataset_sha256=splits.publictest.dataset_sha256,
         mean_artifact_sha256=mean_sha,
     )
@@ -356,6 +345,7 @@ def test_mixed_preflight_consumes_permitted_splits_artifact(tmp_path) -> None:
     config_path.write_text(
         Path("configs/experiments/fer2013_resnet18_e7_occlusion_mixed.yaml")
         .read_text(encoding="utf-8")
+        .replace("  run_role: formal_mixed\n", "  run_role: synthetic_mixed\n", 1)
         .replace("  num_workers: 4\n", "  num_workers: 0\n", 1)
         .replace("/path/to/training_mean_v2.json", str(mean_path))
         .replace("/path/to/publictest_manifest_v2.csv", str(manifest_path)),

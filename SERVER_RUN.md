@@ -9,8 +9,8 @@ For detailed instructions, see docs/server_runbook.md
 [`docs/experiment_protocol.md`](docs/experiment_protocol.md)。数据、权重、输出和
 密钥必须保存在 Git 仓库外。
 
-Stage 8 正式训练尚未开始，PrivateTest 尚未访问。E0-E7 seed-2026 结果仅属于
-screening，不得作为正式三种子结果。
+Stage 8 mixed 正式训练尚未开始，PrivateTest 尚未访问。三组 locked E7 clean
+checkpoint 已存在；E0-E7 seed-2026 screening 不得作为正式三种子结果。
 
 ## 1. 服务器环境准备
 
@@ -67,7 +67,21 @@ kaggle datasets download -d deadskull7/fer2013 -p "${FER_DATA}" --unzip
 ls -lh "${FER_DATA}/fer2013.csv"
 ```
 
-## 5. Preflight 检查
+## 5. 生成 Stage B artifacts
+
+combined CSV 由代码按官方 `Usage` 字段自动筛选，无需手工拆分：
+
+```bash
+export FER_STAGE_B_ARTIFACTS="${FER_OUTPUT}/stage-b-artifacts"
+python -m occlusion_fer.stage_b_artifacts \
+  --data-path "${FER_DATA}/fer2013.csv" \
+  --output-dir "${FER_STAGE_B_ARTIFACTS}"
+```
+
+该命令要求官方 Training/PublicTest 样本数。PrivateTest 行的 label/pixels 不解析，
+也不参与 hash、mean 或 manifest。
+
+## 6. Preflight 检查
 
 ```bash
 python -m occlusion_fer.preflight \
@@ -80,7 +94,7 @@ python -m occlusion_fer.preflight \
 
 只有末尾出现 `PREFLIGHT PASSED` 才继续。
 
-## 6. 训练入口
+## 7. 训练入口
 
 先做性能 smoke test：
 
@@ -95,11 +109,12 @@ python -m occlusion_fer.train \
 ```
 
 smoke 只验证链路，不能升级为正式 run。只有集成实现已形成干净 commit、完成
-HIVE/Linux 验证且 v2 mean/manifest provenance 通过后，才能按相同 E7 配方分别
-运行 seeds `42`、`123`、`2026` 的 clean 与 mixed 六个独立 run。完整门禁见
+HIVE/Linux 验证且 v2 mean/manifest provenance 通过后，才能按相同 E7 配方运行
+seeds `42`、`123`、`2026` 的三组 mixed run；三组 clean 复用 locked E7 正式
+checkpoint，不重训、不覆盖。完整门禁见
 [`docs/server_runbook.md`](docs/server_runbook.md)。
 
-## 7. 常见问题
+## 8. 常见问题
 
 - CUDA 不可用：检查当前会话、`nvidia-smi` 和 CUDA 版 PyTorch。
 - GPU 利用率低：确认使用 `--num-workers 4`；HIVE 实测 workers 为 0 会严重

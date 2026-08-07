@@ -47,10 +47,11 @@ from occlusion_fer.occlusion import (
     select_training_condition_v2,
 )
 from occlusion_fer.permitted_splits import (
-    is_permitted_splits_artifact_path,
-    load_permitted_splits,
+    STAGE_B_SOURCE_ROUTING_VERSION,
+    load_stage_b_source,
     permitted_splits_to_data,
-    reject_combined_dataset_path,
+    stage_b_source_kind,
+    validate_official_stage_b_sources,
 )
 from occlusion_fer.training_mean import (
     load_training_mean_v2,
@@ -447,9 +448,7 @@ def run_training(
 ) -> None:
     """Run clean training and preserve bounded failure information."""
     if config.training.mode == "mixed":
-        if not _uses_permitted_splits_artifact(config):
-            reject_combined_dataset_path(config.dataset.path, occlusion_enabled=True)
-        _resolve_permitted_splits_path(config)
+        _resolve_stage_b_source_path(config)
     else:
         _resolve_fer2013_data_path(config)
     output_path = _reserve_output_directory(config.output.directory)
@@ -483,10 +482,18 @@ def _run_training(
     _print_device_diagnostics(config.training.device, device)
     print(f"amp_enabled={amp_enabled}")
 
+    stage_b_training_sha256: str | None = None
+    stage_b_publictest_sha256: str | None = None
     if config.training.mode == "mixed":
-        data = permitted_splits_to_data(
-            load_permitted_splits(_resolve_permitted_splits_path(config))
+        stage_b_source = load_stage_b_source(
+            _resolve_stage_b_source_path(config)
         )
+        if config.project.run_role == "formal_mixed":
+            validate_official_stage_b_sources(stage_b_source)
+        stage_b_training_sha256 = stage_b_source.training.dataset_sha256
+        stage_b_publictest_sha256 = stage_b_source.publictest.dataset_sha256
+        data = permitted_splits_to_data(stage_b_source)
+        del stage_b_source
     else:
         data_path = _resolve_fer2013_data_path(config)
         data = load_fer2013_csv(
@@ -520,11 +527,18 @@ def _run_training(
     mixed_mean_sha256: str | None = None
     if config.training.mode == "mixed":
         if config.occlusion is None or config.occlusion.artifacts.training_mean is None:
-            raise ValueError("mixed training requires occlusion.artifacts.training_mean")
+            raise ValueError(
+                "mixed training requires occlusion.artifacts.training_mean"
+            )
         mean_artifact = load_training_mean_v2(
             config.occlusion.artifacts.training_mean
         )
-        mixed_fill_vector = normalized_fill_vector_v2(mean_artifact)
+        if stage_b_training_sha256 is None:
+            raise ValueError("mixed training requires a validated Stage B source")
+        mixed_fill_vector = normalized_fill_vector_v2(
+            mean_artifact,
+            training_dataset_sha256=stage_b_training_sha256,
+        )
         mixed_mean_sha256 = training_mean_v2_sha256(mean_artifact)
 
     train_loader = create_dataloader(
@@ -563,10 +577,19 @@ def _run_training(
     if mixed_mean_sha256 is not None:
         resolved_config["occlusion_runtime"] = {
             "training_mean_sha256": mixed_mean_sha256,
+            "training_dataset_sha256": stage_b_training_sha256,
+            "publictest_dataset_sha256": stage_b_publictest_sha256,
+            "source_routing_version": STAGE_B_SOURCE_ROUTING_VERSION,
         }
     protocol_identity = _training_protocol_identity(config)
     if mixed_mean_sha256 is not None:
         protocol_identity["training_mean_sha256"] = mixed_mean_sha256
+        protocol_identity["training_dataset_sha256"] = (
+            stage_b_training_sha256
+        )
+        protocol_identity["publictest_dataset_sha256"] = (
+            stage_b_publictest_sha256
+        )
     output_path = Path(config.output.directory).expanduser()
     resolved_config_path = write_resolved_config(output_path, resolved_config)
     started_at_utc = utc_now()
@@ -852,6 +875,7 @@ def _training_protocol_identity(config: AppConfig) -> dict[str, object]:
         "ratios": list(protocol.ratios),
         "evaluation_mask_seed": protocol.evaluation_mask_seed,
         "sampling_clean_probability": config.occlusion.sampling.clean_probability,
+        "source_routing_version": STAGE_B_SOURCE_ROUTING_VERSION,
         "training_mean_artifact": config.occlusion.artifacts.training_mean,
         "manifest": config.occlusion.artifacts.manifest,
     }
@@ -969,27 +993,16 @@ def _resolve_fer2013_data_path(config: AppConfig) -> Path:
     return data_path
 
 
-def _uses_permitted_splits_artifact(config: AppConfig) -> bool:
-    return (
-        config.training.mode == "mixed"
-        and config.dataset.permitted_splits == ("Training", "PublicTest")
-        and is_permitted_splits_artifact_path(config.dataset.path)
-    )
-
-
-def _resolve_permitted_splits_path(config: AppConfig) -> Path:
+def _resolve_stage_b_source_path(config: AppConfig) -> Path:
     if config.dataset.permitted_splits != ("Training", "PublicTest"):
         raise ValueError(
             "mixed training requires dataset.permitted_splits=[Training, PublicTest]"
         )
-    if not is_permitted_splits_artifact_path(config.dataset.path):
-        raise ValueError(
-            "mixed training requires an explicit permitted-splits .json artifact path"
-        )
+    stage_b_source_kind(config.dataset.path)
     source_path = Path(config.dataset.path).expanduser()
     if not source_path.is_file():
         raise FileNotFoundError(
-            f"permitted-splits artifact does not exist or is not a file: {source_path}"
+            f"Stage B source does not exist or is not a file: {source_path}"
         )
     return source_path
 
