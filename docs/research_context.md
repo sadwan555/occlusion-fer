@@ -42,6 +42,10 @@ Occlusion ratios are limited to:
 
 A small CNN is used only to verify the training pipeline.
 
+The current formal protocol is `occlusion-v2-224` with the locked E7 recipe.
+Earlier E0-E7 seed-2026 runs and `occlusion-v1` / 112 artifacts are development
+history, not formal evidence.
+
 ## Research questions
 
 RQ1: Do upper-face, lower-face, and random rectangular occlusions produce
@@ -63,6 +67,10 @@ The official split meanings are preserved:
 - PublicTest: validation and checkpoint selection;
 - PrivateTest: final testing only.
 
+Expected official counts are 28,709 Training, 3,589 PublicTest, and 3,589
+PrivateTest samples. PrivateTest remains sealed until the recipe, all six best
+checkpoints, masks, and reporting plan are locked.
+
 Data must remain outside Git. Paths are supplied through YAML configuration.
 Original numeric labels and mapped label names must both be retained.
 
@@ -75,7 +83,7 @@ Formal model:
 - standard ResNet stem;
 - seven-class output layer;
 - grayscale images replicated to three channels;
-- input resized to 112×112.
+- input resized bilinearly to 224×224.
 
 Sanity model:
 
@@ -101,6 +109,11 @@ conditions.
 Both strategies use the same model, data split, optimizer, training budget,
 random seeds, checkpoint rule, and evaluation masks.
 
+The shared E7 recipe uses Training-only mild affine augmentation, AdamW with
+learning rate 0.0001 and weight decay 0.001, label smoothing 0.1, no scheduler,
+50 epochs, batch size 128, four DataLoader workers, and CUDA AMP. Checkpoints
+are selected only by strict improvement in clean PublicTest macro-F1.
+
 ## Formal runs
 
 Formal experiments use three seeds:
@@ -112,6 +125,10 @@ Formal experiments use three seeds:
 This produces six formal ResNet-18 training runs: three clean-only and three
 mixed.
 
+Stage 8 formal training has not started. The single-seed E7 screening run does
+not count toward these six runs, and no formal Stage B result is currently
+available.
+
 ## Evaluation
 
 Each checkpoint is evaluated on ten conditions:
@@ -122,6 +139,8 @@ Each checkpoint is evaluated on ten conditions:
 - random rectangle at 20%, 30%, and 40%.
 
 All compared checkpoints use the same deterministic evaluation masks.
+PublicTest masks use v2 evaluation seed 20260804 and a validated 32,301-row
+manifest. Masked PublicTest performance cannot select a checkpoint.
 
 Reported metrics are:
 

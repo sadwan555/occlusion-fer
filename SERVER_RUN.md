@@ -4,8 +4,13 @@ For detailed instructions, see docs/server_runbook.md
 
 ## 项目简介
 
-本项目在 FER2013 数据集标签上训练 ImageNet 预训练 ResNet-18，并为后续遮挡
-鲁棒性实验提供 clean baseline。数据、权重、输出和密钥必须保存在 Git 仓库外。
+本项目在 FER2013 数据集标签上训练 ImageNet 预训练 ResNet-18，并按锁定的 E7 /
+`occlusion-v2-224` 协议比较 clean-only 与 mixed training。完整权威协议见
+[`docs/experiment_protocol.md`](docs/experiment_protocol.md)。数据、权重、输出和
+密钥必须保存在 Git 仓库外。
+
+Stage 8 正式训练尚未开始，PrivateTest 尚未访问。E0-E7 seed-2026 结果仅属于
+screening，不得作为正式三种子结果。
 
 ## 1. 服务器环境准备
 
@@ -66,7 +71,7 @@ ls -lh "${FER_DATA}/fer2013.csv"
 
 ```bash
 python -m occlusion_fer.preflight \
-  --config configs/fer2013_resnet18_clean.yaml \
+  --config configs/experiments/fer2013_resnet18_e7_clean.yaml \
   --data-path "${FER_DATA}/fer2013.csv" \
   --output-dir "${FER_OUTPUT}/preflight" \
   --device cuda \
@@ -81,7 +86,7 @@ python -m occlusion_fer.preflight \
 
 ```bash
 python -m occlusion_fer.train \
-  --config configs/fer2013_resnet18_clean.yaml \
+  --config configs/experiments/fer2013_resnet18_e7_high_resolution_longer.yaml \
   --data-path "${FER_DATA}/fer2013.csv" \
   --output-dir "${FER_OUTPUT}/clean-smoke" \
   --seed 42 --device cuda --epochs 1 \
@@ -89,9 +94,10 @@ python -m occlusion_fer.train \
   --max-train-samples 8192 --max-validation-samples 1024
 ```
 
-确认 smoke 成功后，删除样本上限并分别使用 seeds `42`、`123`、`2026`，每个
-run 使用独立输出目录和相同的 30 epoch 参数。完整三种子命令与最终 PrivateTest
-步骤见 [`docs/server_runbook.md`](docs/server_runbook.md)。
+smoke 只验证链路，不能升级为正式 run。只有集成实现已形成干净 commit、完成
+HIVE/Linux 验证且 v2 mean/manifest provenance 通过后，才能按相同 E7 配方分别
+运行 seeds `42`、`123`、`2026` 的 clean 与 mixed 六个独立 run。完整门禁见
+[`docs/server_runbook.md`](docs/server_runbook.md)。
 
 ## 7. 常见问题
 
@@ -104,5 +110,5 @@ run 使用独立输出目录和相同的 30 epoch 参数。完整三种子命令
   YAML。
 - 显存不足：减小 batch size，并为所有对比实验统一记录新值；不要只改变某个
   seed。
-- 已存在最终结果：`final_evaluate` 会拒绝覆盖，保留原始证据并使用新的、明确
-  命名的正式 run 目录。
+- 已存在结果：不要覆盖；当前不要运行 `final_evaluate` 或访问 PrivateTest，正式
+  重跑必须先记录原因并使用新的、明确命名的 run 目录。

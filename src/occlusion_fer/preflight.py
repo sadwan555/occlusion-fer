@@ -24,6 +24,18 @@ from occlusion_fer.data import (
     load_fer2013_csv,
 )
 from occlusion_fer.models import create_resnet18
+from occlusion_fer.mask_manifest import load_manifest_v2
+from occlusion_fer.permitted_splits import (
+    is_permitted_splits_artifact_path,
+    load_permitted_splits,
+    permitted_splits_to_data,
+    reject_combined_dataset_path,
+)
+from occlusion_fer.training_mean import (
+    load_training_mean_v2,
+    training_mean_v2_sha256,
+    validate_training_mean_v2,
+)
 from occlusion_fer.torch_data import Fer2013TorchDataset, create_dataloader
 from occlusion_fer.train import (
     apply_config_overrides,
@@ -396,6 +408,20 @@ def run_preflight(args: argparse.Namespace) -> PreflightResult:
     warnings: tuple[str, ...] = ()
     try:
         config = _resolved_config(args)
+        permitted_source = None
+        if config.training.mode == "mixed" or config.occlusion is not None:
+            if config.dataset.image_size != 224:
+                raise PreflightError("occlusion-enabled preflight requires image_size=224")
+            if config.training.mode == "mixed" and is_permitted_splits_artifact_path(config.dataset.path):
+                if config.dataset.permitted_splits != ("Training", "PublicTest"):
+                    raise PreflightError(
+                        "mixed preflight requires dataset.permitted_splits=[Training, PublicTest]"
+                    )
+                permitted_source = load_permitted_splits(config.dataset.path)
+            else:
+                reject_combined_dataset_path(config.dataset.path, occlusion_enabled=True)
+        if config.training.mode == "mixed" and permitted_source is not None:
+            _validate_mixed_artifacts(config, permitted_source)
 
         stage = "environment"
         requested_device = config.training.device
@@ -408,13 +434,18 @@ def run_preflight(args: argparse.Namespace) -> PreflightResult:
         )
 
         stage = "data file"
-        data_path = validate_data_path(config.dataset.path)
-        print(f"data_path={data_path.resolve()}")
+        if permitted_source is not None:
+            data_path = Path(config.dataset.path).expanduser()
+            print(f"permitted_splits_path={data_path.resolve()}")
+        else:
+            data_path = validate_data_path(config.dataset.path)
+            print(f"data_path={data_path.resolve()}")
 
         stage = "data parsing"
-        data = load_fer2013_csv(
-            data_path,
-            include_splits=PREFLIGHT_SPLITS,
+        data = (
+            permitted_splits_to_data(permitted_source)
+            if permitted_source is not None
+            else load_fer2013_csv(data_path, include_splits=PREFLIGHT_SPLITS)
         )
         _validate_loaded_records(data)
         split_counts = count_split_labels(data)
@@ -494,6 +525,30 @@ def run_preflight(args: argparse.Namespace) -> PreflightResult:
             failed_stage=stage,
             error=str(exc),
         )
+
+
+def _validate_mixed_artifacts(config: AppConfig, permitted_source: object) -> None:
+    if config.occlusion is None:
+        raise PreflightError("mixed preflight requires an occlusion v2 configuration")
+    mean_path = config.occlusion.artifacts.training_mean
+    manifest_path = config.occlusion.artifacts.manifest
+    if mean_path is None or manifest_path is None:
+        raise PreflightError("mixed preflight requires mean and manifest artifacts")
+    mean = load_training_mean_v2(mean_path)
+    training_source = permitted_source.training
+    validate_training_mean_v2(
+        mean,
+        training_dataset_sha256=training_source.dataset_sha256,
+    )
+    mean_sha = training_mean_v2_sha256(mean)
+    manifest_csv = Path(manifest_path).expanduser()
+    manifest_sidecar = manifest_csv.with_suffix(".json")
+    load_manifest_v2(
+        manifest_csv,
+        manifest_sidecar,
+        publictest_dataset_sha256=permitted_source.publictest.dataset_sha256,
+        training_mean_artifact_sha256=mean_sha,
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:

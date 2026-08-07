@@ -1,3 +1,5 @@
+# Historical Stage A artifact configuration. It is occlusion-v1 / 112 and is
+# retained for development provenance; current formal work uses occlusion-v2-224.
 occlusion:
   algorithm_version: occlusion-v1
   mean_algorithm_version: training-mean-v1

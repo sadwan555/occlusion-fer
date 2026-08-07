@@ -1,0 +1,84 @@
+project:
+  name: occlusion-fer
+  experiment_name: e7_occlusion_mixed
+  run_role: formal_mixed
+dataset:
+  name: fer2013
+  path: /path/to/permitted_splits.json
+  image_size: 224
+  num_classes: 7
+  permitted_splits: [Training, PublicTest]
+  augmentation:
+    type: mild_affine
+    horizontal_flip_probability: 0.5
+    affine_probability: 0.5
+    degrees: 7.0
+    translate: [0.05, 0.05]
+    scale: [0.97, 1.03]
+    interpolation: bilinear
+    fill: 0.0
+model:
+  name: resnet18
+  pretrained: true
+training:
+  mode: mixed
+  seed: 2026
+  epochs: 50
+  batch_size: 128
+  learning_rate: 0.0001
+  weight_decay: 0.001
+  num_workers: 4
+  device: cuda
+  loss:
+    type: cross_entropy
+    label_smoothing: 0.1
+  scheduler:
+    type: none
+    warmup_epochs: 0
+    warmup_start_factor: 1.0
+    min_learning_rate: 0.0001
+  early_stopping:
+    enabled: false
+    patience: 8
+output:
+  directory: outputs/formal-mixed/e7_occlusion_mixed
+occlusion:
+  protocol:
+    algorithm_version: occlusion-v2-224
+    mean_algorithm_version: training-mean-v2
+    manifest_schema_version: 2
+    dataset_name: fer2013
+    image_size: 224
+    types: [upper_face, lower_face, random_rectangle]
+    ratios: ["0.20", "0.30", "0.40"]
+    fill_source: training_split_global_mean
+    evaluation_mask_seed: 20260804
+    coordinate_convention: "half-open:[top,top+height)x[left,left+width)"
+  sampling:
+    clean_probability: 0.5
+    condition_order:
+      - upper_face_0.20
+      - upper_face_0.30
+      - upper_face_0.40
+      - lower_face_0.20
+      - lower_face_0.30
+      - lower_face_0.40
+      - random_rectangle_0.20
+      - random_rectangle_0.30
+      - random_rectangle_0.40
+  artifacts:
+    training_mean: /path/to/training_mean_v2.json
+    manifest: /path/to/publictest_manifest_v2.csv
+  evaluation:
+    split: validation
+    conditions:
+      - clean
+      - upper_face_0.20
+      - upper_face_0.30
+      - upper_face_0.40
+      - lower_face_0.20
+      - lower_face_0.30
+      - lower_face_0.40
+      - random_rectangle_0.20
+      - random_rectangle_0.30
+      - random_rectangle_0.40

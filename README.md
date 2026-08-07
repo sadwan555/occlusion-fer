@@ -9,19 +9,25 @@ ResNet-18，并逐步研究合成面部遮挡对七分类性能的影响。
 
 ## 当前阶段
 
-当前代码完成了 clean baseline 的可复现训练与评估基础：
+当前权威实验协议见
+[`docs/experiment_protocol.md`](docs/experiment_protocol.md)。锁定边界如下：
 
 - `Training` 用于训练；
 - `PublicTest` 用于逐 epoch 验证，并按 clean validation macro-F1 选择
   `best.pt`；
-- `PrivateTest` 不会被训练入口加载，只能通过显式确认的最终评估入口访问；
+- `PrivateTest` 尚未访问，只能在六个正式 checkpoint、v2 masks 和报告计划全部
+  锁定后进行一次最终评估；
 - 固定七类顺序：angry、disgust、fear、happy、sad、surprise、neutral；
-- 灰度图复制为三通道，缩放到 `112×112`，使用 ImageNet normalization；
+- E7 灰度图复制为三通道，bilinear 缩放到 `224×224`，使用 ImageNet normalization；历史 v1/112 代码和产物只作为开发记录；
+- 当前遮挡协议为 `occlusion-v2-224`，仅允许 `upper_face`、`lower_face`、`random_rectangle` 和 `0.20`、`0.30`、`0.40`；
+- Stage B 只接受 Training-only、PublicTest-only 或 permitted-splits artifact；mixed 配置使用显式 `.json` source，combined CSV 在打开前拒绝；
 - 保存 best/last checkpoint、训练历史、逐类指标、混淆矩阵和逐样本预测；
 - 记录解析后的配置、Git 状态、软件版本、设备和失败信息。
 
-遮挡生成、mixed clean/occluded training、十种最终评估条件和跨种子汇总属于
-后续批准阶段，当前尚未实现。
+E0-E7 seed-2026 运行是配方筛选历史，不是正式三种子证据。Stage 8 的三组 clean
+与三组 mixed 正式训练尚未开始；当前没有可报告的 Stage B 正式结果。mixed
+clean/occluded training 与十种 PublicTest 条件 evaluator 只在 v2 artifact 身份
+完整时启用；PrivateTest 不属于当前 Stage 6/7 验证范围。
 
 ## 项目结构
 
@@ -29,6 +35,7 @@ ResNet-18，并逐步研究合成面部遮挡对七分类性能的影响。
 configs/                  可移植 YAML 配置（数据路径保持 placeholder）
 src/occlusion_fer/        数据、模型、训练、评估和产物代码
 tests/                    自动测试
+docs/experiment_protocol.md 当前唯一正式实验协议
 docs/server_runbook.md    完整 HIVE 部署、排错和实验规范
 SERVER_RUN.md             五分钟服务器快速开始
 ```
@@ -41,7 +48,7 @@ SERVER_RUN.md             五分钟服务器快速开始
 
 ```bash
 python -m occlusion_fer.preflight \
-  --config configs/fer2013_resnet18_clean.yaml \
+  --config configs/experiments/fer2013_resnet18_e7_clean.yaml \
   --data-path /path/to/fer2013.csv \
   --output-dir /path/to/preflight-output \
   --device cuda
@@ -51,33 +58,22 @@ clean 训练：
 
 ```bash
 python -m occlusion_fer.train \
-  --config configs/fer2013_resnet18_clean.yaml \
+  --config configs/experiments/fer2013_resnet18_e7_clean.yaml \
   --data-path /path/to/fer2013.csv \
   --output-dir /path/to/run-output \
   --seed 42 \
   --device cuda \
-  --epochs 30 \
+  --epochs 50 \
   --batch-size 128 \
   --num-workers 4 \
   --amp
 ```
 
-只有在模型、超参数、遮挡 masks、mixed protocol 和 checkpoint 规则全部锁定
-后，才把下面的 clean 命令作为最终评估批次的一部分运行；当前 clean 开发阶段
-不要提前查看 PrivateTest：
-
-```bash
-python -m occlusion_fer.final_evaluate \
-  --config configs/fer2013_resnet18_clean.yaml \
-  --checkpoint /path/to/run-output/best.pt \
-  --data-path /path/to/fer2013.csv \
-  --output-dir /path/to/run-output \
-  --device cuda \
-  --batch-size 128 \
-  --num-workers 4 \
-  --amp \
-  --confirm-private-test
-```
+上述命令只展示锁定的 clean 配方；必须先完成干净 commit、HIVE/Linux 验证和
+v2 artifact gate，才能启动 Stage 8。mixed 配置为
+`configs/experiments/fer2013_resnet18_e7_occlusion_mixed.yaml`，它要求服务器本地
+YAML 中的 permitted-splits、Training mean 和 PublicTest manifest 路径均已解析并
+通过 preflight。当前不要运行 `final_evaluate`，也不要访问 PrivateTest。
 
 服务器上的完整顺序、三种子命令、输出解释和故障处理见
 [`docs/server_runbook.md`](docs/server_runbook.md)。
@@ -90,10 +86,12 @@ python -m occlusion_fer.final_evaluate \
 - `run_metadata.json`：Git、软件、设备、种子和运行状态；
 - `history.csv`：绘制 loss、accuracy、macro-F1 与训练吞吐曲线；
 - `validation/best_*`：说明 checkpoint 选择依据；
-- `final_test/clean_metrics.json`：锁定后的 clean test 总体结果；
-- `*_per_class_metrics.csv`：逐类结果表或柱状图；
-- `*_confusion_matrix.csv`：混淆矩阵图；
-- `*_predictions.csv`：配对条件比较、错误分析和可追溯样本结果。
+- `conditions/<condition>/<condition>_*`：同一 PublicTest 样本集合上的十条件指标；
+- `conditions/*_paired_drop.csv`：clean 与对应遮挡条件的逐样本配对变化；
+- `conditions/<condition>/<condition>_per_class_metrics.csv`：逐类结果表或柱状图；
+- `conditions/<condition>/<condition>_confusion_matrix.csv`：混淆矩阵图；
+- `conditions/<condition>/<condition>_predictions.csv`：配对条件比较、错误分析和可追溯样本结果。
 
-这些文件提供论文图表的原始证据；不要手工改写输出数值，也不要只报告表现
-最好的 seed。
+这些文件只有在六个 Stage 8 run 按当前协议完成并通过 provenance 校验后才是论文
+候选证据；当前状态为 pending。不要手工改写输出数值，也不要只报告表现最好的
+seed，synthetic、smoke 和 screening 产物不能作为正式结果。

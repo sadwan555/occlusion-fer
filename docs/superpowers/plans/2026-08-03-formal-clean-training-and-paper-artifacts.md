@@ -1,5 +1,9 @@
 # Formal Clean Training and Paper Artifacts Implementation Plan
 
+> Historical implementation plan. The current formal protocol is
+> [`../../experiment_protocol.md`](../../experiment_protocol.md); this plan is
+> retained for provenance and does not authorize a new run.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make clean FER2013 ResNet-18 runs reproducible, select checkpoints by PublicTest macro-F1, evaluate PrivateTest only through an explicit final command, and emit paper-ready metrics and prediction artifacts.

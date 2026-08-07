@@ -16,6 +16,13 @@ _TYPE_COUNT = 3
 _RATIO_COUNT = 3
 _U64_LIMIT = 2**64
 
+V2_IMAGE_HEIGHT = 224
+V2_IMAGE_WIDTH = 224
+V2_ALGORITHM_VERSION = "occlusion-v2-224"
+V2_EVALUATION_MASK_SEED = 20260804
+V2_RATIO_TOKENS = ("0.20", "0.30", "0.40")
+V2_TYPE_TOKENS = ("upper_face", "lower_face", "random_rectangle")
+
 
 def build_training_decision_payload(
     sample_id: int,
@@ -181,3 +188,90 @@ def _require_u64(value: object) -> None:
     _require_integer(value, "value")
     if not 0 <= value < _U64_LIMIT:
         raise ValueError("value must be an unsigned 64-bit integer")
+
+
+def canonical_payload_bytes_v2(payload: list[object]) -> bytes:
+    """Serialize a v2 payload without any self-referential digest field."""
+    if type(payload) is not list:
+        raise TypeError("payload must be a list")
+    return json.dumps(
+        payload,
+        ensure_ascii=True,
+        allow_nan=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def sha256_digest_v2(payload: list[object]) -> bytes:
+    return hashlib.sha256(canonical_payload_bytes_v2(payload)).digest()
+
+
+def u64_for_payload_v2(payload: list[object]) -> int:
+    return int.from_bytes(sha256_digest_v2(payload)[:8], "big", signed=False)
+
+
+def build_v2_training_decision_payload(
+    sample_id: int, training_seed: int, epoch: int, namespace: str
+) -> list[object]:
+    _validate_training_identity(sample_id, training_seed, epoch)
+    _require_member(namespace, _DECISION_NAMESPACES, "namespace")
+    return [
+        _DATASET_NAME, _TRAINING_SPLIT, sample_id, training_seed, epoch,
+        V2_IMAGE_HEIGHT, V2_IMAGE_WIDTH, V2_ALGORITHM_VERSION, namespace,
+    ]
+
+
+def build_v2_training_coordinate_payload(
+    sample_id: int,
+    training_seed: int,
+    epoch: int,
+    selected_condition: str,
+    occlusion_type: str,
+    ratio_token: str,
+    axis: str,
+) -> list[object]:
+    _validate_training_identity(sample_id, training_seed, epoch)
+    _require_nonempty_string(selected_condition, "selected_condition")
+    _require_member(occlusion_type, frozenset(V2_TYPE_TOKENS), "occlusion_type")
+    _require_member(ratio_token, frozenset(V2_RATIO_TOKENS), "ratio_token")
+    _require_member(axis, _COORDINATE_AXES, "axis")
+    return [
+        _DATASET_NAME, _TRAINING_SPLIT, sample_id, training_seed, epoch,
+        V2_IMAGE_HEIGHT, V2_IMAGE_WIDTH, V2_ALGORITHM_VERSION, axis,
+        selected_condition, occlusion_type, ratio_token, axis,
+    ]
+
+
+def build_v2_evaluation_coordinate_payload(
+    sample_id: int,
+    condition: str,
+    occlusion_type: str,
+    ratio_token: str,
+    axis: str,
+) -> list[object]:
+    _require_positive_integer(sample_id, "sample_id")
+    _require_nonempty_string(condition, "condition")
+    _require_member(occlusion_type, frozenset(V2_TYPE_TOKENS), "occlusion_type")
+    _require_member(ratio_token, frozenset(V2_RATIO_TOKENS), "ratio_token")
+    _require_member(axis, _COORDINATE_AXES, "axis")
+    return [
+        _DATASET_NAME, _EVALUATION_SPLIT, sample_id, V2_EVALUATION_MASK_SEED,
+        V2_IMAGE_HEIGHT, V2_IMAGE_WIDTH, V2_ALGORITHM_VERSION, axis,
+        condition, occlusion_type, ratio_token, axis,
+    ]
+
+
+def v2_apply_from_u64(value: int) -> bool:
+    return apply_from_u64(value)
+
+
+def v2_type_index_from_u64(value: int) -> int:
+    return type_index_from_u64(value)
+
+
+def v2_ratio_index_from_u64(value: int) -> int:
+    return ratio_index_from_u64(value)
+
+
+def v2_coordinate_from_u64(value: int, available_positions: int) -> int:
+    return coordinate_from_u64(value, available_positions)

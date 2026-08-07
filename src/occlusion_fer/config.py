@@ -16,6 +16,7 @@ class ConfigError(ValueError):
 class ProjectConfig:
     name: str
     experiment_name: str | None = None
+    run_role: str | None = None
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,7 @@ class DatasetConfig:
     image_size: int
     num_classes: int
     augmentation: AugmentationConfig = field(default_factory=AugmentationConfig)
+    permitted_splits: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -101,12 +103,58 @@ class OcclusionConfig:
 
 
 @dataclass(frozen=True)
+class OcclusionProtocolConfig:
+    algorithm_version: str
+    mean_algorithm_version: str
+    manifest_schema_version: int
+    dataset_name: str
+    image_size: int
+    types: tuple[str, ...]
+    ratios: tuple[str, ...]
+    fill_source: str
+    evaluation_mask_seed: int
+    coordinate_convention: str
+
+
+@dataclass(frozen=True)
+class OcclusionSamplingConfig:
+    clean_probability: float = 0.5
+    condition_order: tuple[str, ...] = (
+        "upper_face_0.20", "upper_face_0.30", "upper_face_0.40",
+        "lower_face_0.20", "lower_face_0.30", "lower_face_0.40",
+        "random_rectangle_0.20", "random_rectangle_0.30",
+        "random_rectangle_0.40",
+    )
+
+
+@dataclass(frozen=True)
+class OcclusionArtifactsConfig:
+    training_mean: str | None = None
+    manifest: str | None = None
+
+
+@dataclass(frozen=True)
+class OcclusionEvaluationConfig:
+    split: str = "validation"
+    conditions: tuple[str, ...] = ("clean",) + OcclusionSamplingConfig().condition_order
+
+
+@dataclass(frozen=True)
+class OcclusionIntegrationConfig:
+    protocol: OcclusionProtocolConfig
+    sampling: OcclusionSamplingConfig
+    artifacts: OcclusionArtifactsConfig
+    evaluation: OcclusionEvaluationConfig
+
+
+@dataclass(frozen=True)
 class AppConfig:
     project: ProjectConfig
     dataset: DatasetConfig
     model: ModelConfig
     training: TrainingConfig
     output: OutputConfig
+    occlusion: OcclusionIntegrationConfig | None = None
 
 
 def load_config(path: str | Path) -> AppConfig:
@@ -123,7 +171,7 @@ def load_config(path: str | Path) -> AppConfig:
     root = _require_mapping(raw_config, "configuration root")
     _reject_unknown_fields(
         root,
-        {"project", "dataset", "model", "training", "output"},
+        {"project", "dataset", "model", "training", "output", "occlusion"},
         "configuration root",
     )
     project = _require_mapping(_require_field(root, "project", "project"), "project")
@@ -133,8 +181,15 @@ def load_config(path: str | Path) -> AppConfig:
         _require_field(root, "training", "training"), "training"
     )
     output = _require_mapping(_require_field(root, "output", "output"), "output")
+    _reject_unknown_fields(project, {"name", "experiment_name", "run_role"}, "project")
+    _reject_unknown_fields(dataset, {"name", "path", "image_size", "num_classes", "augmentation", "permitted_splits"}, "dataset")
+    _reject_unknown_fields(model, {"name", "pretrained"}, "model")
+    _reject_unknown_fields(training, {"mode", "seed", "epochs", "batch_size", "learning_rate", "weight_decay", "num_workers", "device", "loss", "scheduler", "early_stopping"}, "training")
+    _reject_unknown_fields(output, {"directory"}, "output")
 
     project_name = _require_string(project, "name", "project.name")
+    run_role = _optional_string(project, "run_role", "project.run_role", default="")
+    run_role = run_role or None
     experiment_name = _optional_string(
         project,
         "experiment_name",
@@ -155,6 +210,7 @@ def load_config(path: str | Path) -> AppConfig:
     if num_classes != 7:
         raise ConfigError("dataset.num_classes must be 7")
     augmentation = _parse_augmentation(dataset)
+    permitted_splits = _optional_split_names(dataset)
 
     model_name = _require_string(model, "name", "model.name")
     if model_name != "resnet18":
@@ -162,8 +218,8 @@ def load_config(path: str | Path) -> AppConfig:
     pretrained = _require_bool(model, "pretrained", "model.pretrained")
 
     training_mode = _require_string(training, "mode", "training.mode")
-    if training_mode != "clean":
-        raise ConfigError("training.mode must be 'clean'")
+    if training_mode not in {"clean", "mixed"}:
+        raise ConfigError("training.mode must be one of clean, mixed")
 
     seed = _require_nonnegative_integer(training, "seed", "training.seed")
     epochs = _require_positive_integer(training, "epochs", "training.epochs")
@@ -263,11 +319,38 @@ def load_config(path: str | Path) -> AppConfig:
         )
 
     output_directory = _require_string(output, "directory", "output.directory")
+    occlusion_raw = root.get("occlusion")
+    occlusion = (
+        None if occlusion_raw is None
+        else _parse_integration_occlusion(occlusion_raw, dataset_name)
+    )
+    if occlusion is not None:
+        if image_size != 224:
+            raise ConfigError(
+                "occlusion-enabled configurations require dataset.image_size=224"
+            )
+        if permitted_splits != ("Training", "PublicTest"):
+            raise ConfigError(
+                "occlusion-enabled configurations require "
+                "dataset.permitted_splits=[Training, PublicTest]"
+            )
+    if training_mode == "mixed" and occlusion is None:
+        raise ConfigError("training.mode=mixed requires a complete occlusion v2 block")
+    if training_mode == "mixed" and occlusion is not None:
+        if occlusion.artifacts.training_mean is None:
+            raise ConfigError(
+                "training.mode=mixed requires occlusion.artifacts.training_mean"
+            )
+        if occlusion.artifacts.manifest is None:
+            raise ConfigError(
+                "training.mode=mixed requires occlusion.artifacts.manifest"
+            )
 
     return AppConfig(
         project=ProjectConfig(
             name=project_name,
             experiment_name=experiment_name,
+            run_role=run_role,
         ),
         dataset=DatasetConfig(
             name=dataset_name,
@@ -275,6 +358,7 @@ def load_config(path: str | Path) -> AppConfig:
             image_size=image_size,
             num_classes=num_classes,
             augmentation=augmentation,
+            permitted_splits=permitted_splits,
         ),
         model=ModelConfig(name=model_name, pretrained=pretrained),
         training=TrainingConfig(
@@ -299,7 +383,104 @@ def load_config(path: str | Path) -> AppConfig:
             ),
         ),
         output=OutputConfig(directory=output_directory),
+        occlusion=occlusion,
     )
+
+
+def _optional_split_names(
+    dataset: Mapping[str, object],
+) -> tuple[str, ...] | None:
+    if "permitted_splits" not in dataset:
+        return None
+    value = dataset["permitted_splits"]
+    if not isinstance(value, list) or any(type(item) is not str for item in value):
+        raise ConfigError("dataset.permitted_splits must be a list of strings")
+    selected = tuple(value)
+    if selected not in (("Training",), ("PublicTest",), ("Training", "PublicTest")):
+        raise ConfigError(
+            "dataset.permitted_splits must be Training, PublicTest, or both in order"
+        )
+    return selected
+
+
+def _parse_integration_occlusion(
+    value: object, dataset_name: str
+) -> OcclusionIntegrationConfig:
+    mapping = _require_mapping(value, "occlusion")
+    _reject_unknown_fields(mapping, {"protocol", "sampling", "artifacts", "evaluation"}, "occlusion")
+    protocol = _require_mapping(_require_field(mapping, "protocol", "occlusion.protocol"), "occlusion.protocol")
+    sampling = _require_mapping(_require_field(mapping, "sampling", "occlusion.sampling"), "occlusion.sampling")
+    artifacts = _require_mapping(_require_field(mapping, "artifacts", "occlusion.artifacts"), "occlusion.artifacts")
+    evaluation = _require_mapping(_require_field(mapping, "evaluation", "occlusion.evaluation"), "occlusion.evaluation")
+    _reject_unknown_fields(protocol, {"algorithm_version", "mean_algorithm_version", "manifest_schema_version", "dataset_name", "image_size", "types", "ratios", "fill_source", "evaluation_mask_seed", "coordinate_convention"}, "occlusion.protocol")
+    algorithm_version = _require_string(protocol, "algorithm_version", "occlusion.protocol.algorithm_version")
+    if algorithm_version != "occlusion-v2-224":
+        raise ConfigError("occlusion.protocol.algorithm_version must be occlusion-v2-224")
+    mean_version = _require_string(protocol, "mean_algorithm_version", "occlusion.protocol.mean_algorithm_version")
+    if mean_version != "training-mean-v2":
+        raise ConfigError("occlusion.protocol.mean_algorithm_version must be training-mean-v2")
+    manifest_version = _require_integer(protocol, "manifest_schema_version", "occlusion.protocol.manifest_schema_version")
+    if manifest_version != 2:
+        raise ConfigError("occlusion.protocol.manifest_schema_version must be 2")
+    protocol_dataset = _require_string(protocol, "dataset_name", "occlusion.protocol.dataset_name")
+    if protocol_dataset != dataset_name or protocol_dataset != "fer2013":
+        raise ConfigError("occlusion.protocol.dataset_name must be fer2013")
+    image_size = _require_integer(protocol, "image_size", "occlusion.protocol.image_size")
+    if image_size != 224:
+        raise ConfigError("occlusion.protocol.image_size must be 224")
+    types = _require_string_list(protocol, "types", "occlusion.protocol.types")
+    if types != ("upper_face", "lower_face", "random_rectangle"):
+        raise ConfigError("occlusion.protocol.types must use the locked three-type order")
+    ratios = _require_string_list(protocol, "ratios", "occlusion.protocol.ratios")
+    if ratios != ("0.20", "0.30", "0.40"):
+        raise ConfigError("occlusion.protocol.ratios must use the locked string tokens")
+    fill_source = _require_string(protocol, "fill_source", "occlusion.protocol.fill_source")
+    if fill_source != "training_split_global_mean":
+        raise ConfigError("occlusion.protocol.fill_source must be training_split_global_mean")
+    evaluation_seed = _require_integer(protocol, "evaluation_mask_seed", "occlusion.protocol.evaluation_mask_seed")
+    if evaluation_seed != 20260804:
+        raise ConfigError("occlusion.protocol.evaluation_mask_seed must be 20260804")
+    coordinate_convention = _require_string(protocol, "coordinate_convention", "occlusion.protocol.coordinate_convention")
+    if coordinate_convention != "half-open:[top,top+height)x[left,left+width)":
+        raise ConfigError("occlusion.protocol.coordinate_convention is not canonical")
+    _reject_unknown_fields(sampling, {"clean_probability", "condition_order"}, "occlusion.sampling")
+    clean_probability = _optional_finite_number(sampling, "clean_probability", "occlusion.sampling.clean_probability", default=0.5)
+    if clean_probability != 0.5:
+        raise ConfigError(
+            "occlusion.sampling.clean_probability is locked to 0.5"
+        )
+    condition_order = _optional_string_list(sampling, "condition_order", "occlusion.sampling.condition_order", default=OcclusionSamplingConfig().condition_order)
+    if condition_order != OcclusionSamplingConfig().condition_order:
+        raise ConfigError("occlusion.sampling.condition_order is not canonical")
+    _reject_unknown_fields(artifacts, {"training_mean", "manifest"}, "occlusion.artifacts")
+    mean_path = _optional_string(artifacts, "training_mean", "occlusion.artifacts.training_mean", default="") or None
+    manifest_path = _optional_string(artifacts, "manifest", "occlusion.artifacts.manifest", default="") or None
+    _reject_unknown_fields(evaluation, {"split", "conditions"}, "occlusion.evaluation")
+    split = _optional_string(evaluation, "split", "occlusion.evaluation.split", default="validation")
+    if split != "validation":
+        raise ConfigError("occlusion.evaluation.split must be validation")
+    conditions = _optional_string_list(evaluation, "conditions", "occlusion.evaluation.conditions", default=("clean",) + condition_order)
+    if conditions != (("clean",) + condition_order):
+        raise ConfigError("occlusion.evaluation.conditions must contain clean plus nine locked conditions")
+    return OcclusionIntegrationConfig(
+        protocol=OcclusionProtocolConfig(algorithm_version, mean_version, manifest_version, protocol_dataset, image_size, types, ratios, fill_source, evaluation_seed, coordinate_convention),
+        sampling=OcclusionSamplingConfig(clean_probability, condition_order),
+        artifacts=OcclusionArtifactsConfig(mean_path, manifest_path),
+        evaluation=OcclusionEvaluationConfig(split, conditions),
+    )
+
+
+def _require_string_list(mapping: Mapping[str, object], key: str, field_name: str) -> tuple[str, ...]:
+    value = _require_field(mapping, key, field_name)
+    if not isinstance(value, list) or any(type(item) is not str or not item for item in value):
+        raise ConfigError(f"{field_name} must be a list of non-empty strings")
+    return tuple(value)
+
+
+def _optional_string_list(mapping: Mapping[str, object], key: str, field_name: str, *, default: tuple[str, ...]) -> tuple[str, ...]:
+    if key not in mapping:
+        return default
+    return _require_string_list(mapping, key, field_name)
 
 
 def load_occlusion_config(path: str | Path) -> OcclusionConfig:

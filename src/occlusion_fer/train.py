@@ -9,7 +9,7 @@ import random
 import time
 from contextlib import nullcontext
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +41,21 @@ from occlusion_fer.models import create_resnet18
 from occlusion_fer.losses import build_training_criterion
 from occlusion_fer.schedulers import EpochLearningRateScheduler
 from occlusion_fer.torch_data import Fer2013TorchDataset, create_dataloader
+from occlusion_fer.occlusion import (
+    apply_training_batch_v2,
+    normalized_fill_vector_v2,
+    select_training_condition_v2,
+)
+from occlusion_fer.permitted_splits import (
+    is_permitted_splits_artifact_path,
+    load_permitted_splits,
+    permitted_splits_to_data,
+    reject_combined_dataset_path,
+)
+from occlusion_fer.training_mean import (
+    load_training_mean_v2,
+    training_mean_v2_sha256,
+)
 
 
 Batch = tuple[Tensor, Tensor, Tensor]
@@ -51,6 +66,7 @@ class TrainingResult:
     average_loss: float
     accuracy: float
     sample_count: int
+    condition_counts: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -138,6 +154,10 @@ def train_one_epoch(
     criterion: nn.Module | None = None,
     amp_enabled: bool = False,
     scaler: torch.amp.GradScaler | None = None,
+    training_seed: int | None = None,
+    epoch: int | None = None,
+    fill_vector: Sequence[float] | None = None,
+    clean_probability: float = 0.5,
 ) -> TrainingResult:
     """Run one training epoch and return sample-weighted loss."""
     _validate_amp(amp_enabled, device)
@@ -152,11 +172,47 @@ def train_one_epoch(
     correct_predictions = 0
     sample_count = 0
     non_blocking = device.type == "cuda"
+    mixed_context = (training_seed is not None) or (epoch is not None) or (fill_vector is not None)
+    if mixed_context and (training_seed is None or epoch is None or fill_vector is None):
+        raise ValueError("mixed masking requires training_seed, epoch, and fill_vector")
+    condition_counts: dict[str, int] = {}
 
     for images, labels, sample_ids in loader:
         batch_size = _validate_batch(images, labels, sample_ids)
         images = images.to(device, non_blocking=non_blocking)
         labels = labels.to(device, non_blocking=non_blocking)
+        sample_ids = sample_ids.to(device, non_blocking=non_blocking)
+
+        if mixed_context:
+            selections = tuple(
+                select_training_condition_v2(
+                    int(sample_id), training_seed, epoch,
+                    clean_probability=clean_probability,
+                )
+                for sample_id in sample_ids.detach().cpu().tolist()
+            )
+            masked_images = images.clone()
+            for condition in sorted({item for item in selections if item is not None}):
+                indices = torch.tensor(
+                    [index for index, item in enumerate(selections) if item == condition],
+                    dtype=torch.int64,
+                    device=device,
+                )
+                condition_images = images.index_select(0, indices)
+                condition_ids = sample_ids.index_select(0, indices)
+                masked, _ = apply_training_batch_v2(
+                    condition_images,
+                    condition_ids,
+                    condition,
+                    fill_vector,
+                    training_seed=training_seed,
+                    epoch=epoch,
+                )
+                masked_images.index_copy_(0, indices, masked)
+            images = masked_images
+            for selected in selections:
+                key = "clean" if selected is None else selected
+                condition_counts[key] = condition_counts.get(key, 0) + 1
 
         optimizer.zero_grad(set_to_none=True)
         with _autocast_context(amp_enabled):
@@ -184,6 +240,7 @@ def train_one_epoch(
         average_loss=total_loss / sample_count,
         accuracy=correct_predictions / sample_count,
         sample_count=sample_count,
+        condition_counts=condition_counts,
     )
 
 
@@ -389,7 +446,12 @@ def run_training(
     amp_enabled: bool = False,
 ) -> None:
     """Run clean training and preserve bounded failure information."""
-    _resolve_fer2013_data_path(config)
+    if config.training.mode == "mixed":
+        if not _uses_permitted_splits_artifact(config):
+            reject_combined_dataset_path(config.dataset.path, occlusion_enabled=True)
+        _resolve_permitted_splits_path(config)
+    else:
+        _resolve_fer2013_data_path(config)
     output_path = _reserve_output_directory(config.output.directory)
     try:
         _run_training(
@@ -421,12 +483,16 @@ def _run_training(
     _print_device_diagnostics(config.training.device, device)
     print(f"amp_enabled={amp_enabled}")
 
-    data_path = _resolve_fer2013_data_path(config)
-
-    data = load_fer2013_csv(
-        data_path,
-        include_splits=("train", "validation"),
-    )
+    if config.training.mode == "mixed":
+        data = permitted_splits_to_data(
+            load_permitted_splits(_resolve_permitted_splits_path(config))
+        )
+    else:
+        data_path = _resolve_fer2013_data_path(config)
+        data = load_fer2013_csv(
+            data_path,
+            include_splits=("train", "validation"),
+        )
     train_dataset = Fer2013TorchDataset(
         data,
         split="train",
@@ -449,6 +515,17 @@ def _run_training(
         print("SMOKE TEST — NOT A FORMAL EXPERIMENT")
     print(f"actual_train_samples={len(train_dataset)}")
     print(f"actual_validation_samples={len(validation_dataset)}")
+
+    mixed_fill_vector: Sequence[float] | None = None
+    mixed_mean_sha256: str | None = None
+    if config.training.mode == "mixed":
+        if config.occlusion is None or config.occlusion.artifacts.training_mean is None:
+            raise ValueError("mixed training requires occlusion.artifacts.training_mean")
+        mean_artifact = load_training_mean_v2(
+            config.occlusion.artifacts.training_mean
+        )
+        mixed_fill_vector = normalized_fill_vector_v2(mean_artifact)
+        mixed_mean_sha256 = training_mean_v2_sha256(mean_artifact)
 
     train_loader = create_dataloader(
         train_dataset,
@@ -483,6 +560,13 @@ def _run_training(
         "persistent_workers": config.training.num_workers > 0,
         "prefetch_factor": 2 if config.training.num_workers > 0 else None,
     }
+    if mixed_mean_sha256 is not None:
+        resolved_config["occlusion_runtime"] = {
+            "training_mean_sha256": mixed_mean_sha256,
+        }
+    protocol_identity = _training_protocol_identity(config)
+    if mixed_mean_sha256 is not None:
+        protocol_identity["training_mean_sha256"] = mixed_mean_sha256
     output_path = Path(config.output.directory).expanduser()
     resolved_config_path = write_resolved_config(output_path, resolved_config)
     started_at_utc = utc_now()
@@ -500,6 +584,8 @@ def _run_training(
         output_directory=output_path,
         artifact_paths={"resolved_config": resolved_config_path},
         cuda_device_name=_cuda_device_name(device),
+        run_role=config.project.run_role,
+        protocol_identity=protocol_identity,
     )
     write_json_atomic(run_metadata_path, running_metadata)
 
@@ -552,6 +638,13 @@ def _run_training(
             criterion=training_criterion,
             amp_enabled=amp_enabled,
             scaler=scaler,
+            training_seed=config.training.seed if config.training.mode == "mixed" else None,
+            epoch=epoch if config.training.mode == "mixed" else None,
+            fill_vector=mixed_fill_vector,
+            clean_probability=(
+                config.occlusion.sampling.clean_probability
+                if config.occlusion is not None else 0.5
+            ),
         )
         _synchronize_device(device)
         training_seconds = time.perf_counter() - training_started
@@ -641,6 +734,7 @@ def _run_training(
                 "train_samples_per_second": train_samples_per_second,
                 "cuda_peak_memory_bytes": cuda_peak_memory_bytes,
                 "updated_best_checkpoint": updated_best_checkpoint,
+                "train_condition_counts": training_result.condition_counts,
             }
         )
         history_json_path, history_csv_path = write_history_artifacts(
@@ -713,6 +807,8 @@ def _run_training(
         output_directory=output_path,
         artifact_paths=artifact_paths,
         cuda_device_name=_cuda_device_name(device),
+        run_role=config.project.run_role,
+        protocol_identity=protocol_identity,
     )
     write_json_atomic(run_metadata_path, completed_metadata)
 
@@ -736,6 +832,29 @@ def main(argv: Sequence[str] | None = None) -> None:
         max_validation_samples=args.max_validation_samples,
         amp_enabled=args.amp,
     )
+
+
+def _training_protocol_identity(config: AppConfig) -> dict[str, object]:
+    """Return bounded protocol provenance without embedding source data."""
+    if config.occlusion is None:
+        return {
+            "training_mode": config.training.mode,
+            "image_size": config.dataset.image_size,
+        }
+    protocol = config.occlusion.protocol
+    return {
+        "training_mode": config.training.mode,
+        "algorithm_version": protocol.algorithm_version,
+        "mean_algorithm_version": protocol.mean_algorithm_version,
+        "manifest_schema_version": protocol.manifest_schema_version,
+        "image_size": protocol.image_size,
+        "types": list(protocol.types),
+        "ratios": list(protocol.ratios),
+        "evaluation_mask_seed": protocol.evaluation_mask_seed,
+        "sampling_clean_probability": config.occlusion.sampling.clean_probability,
+        "training_mean_artifact": config.occlusion.artifacts.training_mean,
+        "manifest": config.occlusion.artifacts.manifest,
+    }
 
 
 def _validate_batch(
@@ -848,6 +967,31 @@ def _resolve_fer2013_data_path(config: AppConfig) -> Path:
             f"FER2013 data path does not exist or is not a file: {data_path}"
         )
     return data_path
+
+
+def _uses_permitted_splits_artifact(config: AppConfig) -> bool:
+    return (
+        config.training.mode == "mixed"
+        and config.dataset.permitted_splits == ("Training", "PublicTest")
+        and is_permitted_splits_artifact_path(config.dataset.path)
+    )
+
+
+def _resolve_permitted_splits_path(config: AppConfig) -> Path:
+    if config.dataset.permitted_splits != ("Training", "PublicTest"):
+        raise ValueError(
+            "mixed training requires dataset.permitted_splits=[Training, PublicTest]"
+        )
+    if not is_permitted_splits_artifact_path(config.dataset.path):
+        raise ValueError(
+            "mixed training requires an explicit permitted-splits .json artifact path"
+        )
+    source_path = Path(config.dataset.path).expanduser()
+    if not source_path.is_file():
+        raise FileNotFoundError(
+            f"permitted-splits artifact does not exist or is not a file: {source_path}"
+        )
+    return source_path
 
 
 def _reserve_output_directory(output_directory: str | Path) -> Path:

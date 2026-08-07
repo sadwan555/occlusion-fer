@@ -20,6 +20,11 @@ outputs/
 runs/
 checkpoints/
 logs/
+results/
+artifacts/
+manifests/
+*.manifest.csv
+*training_mean*.json
 
 # Model weights
 *.pt

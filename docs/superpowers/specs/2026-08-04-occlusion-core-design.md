@@ -1,5 +1,10 @@
 # Synthetic Occlusion Core Design
 
+> Historical Stage A design. Its `occlusion-v1` / `112 x 112` identities are
+> retained for development provenance only. The current formal protocol is
+> [`../../experiment_protocol.md`](../../experiment_protocol.md), which uses
+> `occlusion-v2-224` / `224 x 224`.
+
 ## 1. Purpose and research boundary
 
 Stage A defines and later implements the reproducible synthetic-occlusion core

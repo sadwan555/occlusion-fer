@@ -1,5 +1,9 @@
 # Stage A Occlusion Core Implementation Plan
 
+> Historical Stage A plan. It documents the superseded v1/112 development
+> stage; consult [`../../experiment_protocol.md`](../../experiment_protocol.md)
+> for current formal work and do not use this plan to launch experiments.
+
 > For implementation: execute one task at a time. Run the focused checks for that task, stop for review, and only then start the next task. This document authorizes only its own plan-only commit under the gate below; it does not authorize Python implementation, dataset processing, metric generation, or an implementation commit.
 
 ## Goal

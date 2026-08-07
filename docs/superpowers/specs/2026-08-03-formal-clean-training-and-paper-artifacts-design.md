@@ -1,5 +1,9 @@
 # Formal Clean Training and Paper Artifacts Design
 
+> Historical design record. For the current E7 clean/mixed protocol, use
+> [`../../experiment_protocol.md`](../../experiment_protocol.md). This record
+> predates `occlusion-v2-224` and must not be used to start a formal run.
+
 ## Purpose
 
 Prepare the existing FER2013 clean ResNet-18 pipeline for reproducible formal

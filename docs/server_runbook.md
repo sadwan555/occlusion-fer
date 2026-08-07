@@ -1,24 +1,33 @@
-# HIVE 部署、正式 clean baseline 与论文产物手册
+# HIVE 部署、E7 clean/mixed 正式实验与论文产物手册
 
 ## 1. 目的与研究边界
 
-本手册用于在 HIVE 的 Linux + NVIDIA GPU 环境中完成 FER2013 clean
-ResNet-18 的环境验证、三种子正式训练和一次锁定后的 PrivateTest 评估。
+本手册用于在 HIVE 的 Linux + NVIDIA GPU 环境中验证并执行 FER2013 E7
+clean/mixed 协议。当前唯一权威协议是
+[`experiment_protocol.md`](experiment_protocol.md)；本手册中的 E0-E7 部分只保留
+筛选过程的历史可追溯性。
+
+当前状态：Stage 8 正式训练尚未开始，PrivateTest 尚未访问。任何 screening、
+smoke、synthetic 或工程验证数值都不是正式论文结果。
 
 项目只预测 FER2013 定义的七个表情标签。不能把结果解释为识别真实内在情绪、
 困惑、理解程度、参与度或学习效果，也不能据此宣称真实世界鲁棒性、跨数据集
 泛化、创新性或最先进性能。
 
-正式 clean 协议在首次 PrivateTest 评估前锁定为：
+正式 E7 clean/mixed 协议在首次 PrivateTest 评估前锁定为：
 
 - ImageNet 预训练、标准 stem 的 ResNet-18；
-- 灰度图复制为三通道，bilinear resize 到 `112×112`，ImageNet normalization；
+- 灰度图复制为三通道，bilinear resize 到 `224×224`，ImageNet normalization；
 - 官方 `Training` 训练、`PublicTest` 验证、`PrivateTest` 最终测试；
-- AdamW，learning rate `1e-4`，weight decay `1e-4`；
-- batch size `128`，epochs `30`，DataLoader workers `4`，CUDA AMP；
+- AdamW，learning rate `1e-4`，weight decay `0.001`；
+- mild affine augmentation、label smoothing `0.1`；batch size `128`，epochs `50`，DataLoader workers `4`，CUDA AMP；
 - seeds `42`、`123`、`2026`；
 - 按 clean PublicTest macro-F1 选择 `best.pt`，相同分数保留更早 epoch；
-- 三个 seed 使用相同模型、处理、超参数和 checkpoint 规则。
+- clean 与 mixed 的三个 seed 使用相同模型、处理、超参数和 checkpoint 规则；
+- mixed 中每个 Training 样本按 sample ID、seed 和 one-based epoch 确定性选择：
+  50% clean，50% 从九个批准条件中均匀选择；
+- `occlusion-v2-224` PublicTest evaluator 固定使用 seed `20260804` 和同一个经验证
+  manifest，masked 指标绝不参与 checkpoint 选择。
 
 不要在查看 PrivateTest 结果后修改这些设置。任何后续 clean 与 mixed 对比也必须
 使用同一套正式训练预算和选择规则。
@@ -130,6 +139,10 @@ CSV 必须包含 `emotion,pixels,Usage`，并保留三个官方 split 名称。
 
 ## 6. Preflight
 
+Stage 6/7 的遮挡入口只接受分离的 Training-only 与 PublicTest-only source，或
+permitted-splits artifact（mixed 配置的 `dataset.path` 必须指向显式 `.json` artifact）。combined FER2013 CSV 会在打开前拒绝；Stage B 不读取、
+解析、hash 或推理 PrivateTest。
+
 preflight 检查环境、CSV schema、Training/PublicTest、batch、随机初始化模型
 forward 和输出目录；它在 CSV 读取阶段跳过 PrivateTest 行，不解析其标签、像素、
 数量或类别统计，也不会训练、下载预训练权重或保存 checkpoint。
@@ -138,7 +151,7 @@ forward 和输出目录；它在 CSV 读取阶段跳过 PrivateTest 行，不解
 cd "${FER_PROJECT_ROOT}"
 set -o pipefail
 python -m occlusion_fer.preflight \
-  --config configs/fer2013_resnet18_clean.yaml \
+  --config configs/experiments/fer2013_resnet18_e7_clean.yaml \
   --data-path "${FER_DATA_CSV}" \
   --output-dir "${FER_OUTPUT_ROOT}/preflight" \
   --device cuda \
@@ -147,8 +160,9 @@ python -m occlusion_fer.preflight \
 ```
 
 只有末尾出现 `PREFLIGHT PASSED` 才继续。应确认 Training、PublicTest 数量合理，
-输出中没有 `test_samples` 或 `test_class_counts`，batch 为 `[N,3,112,112]`，
-logits 为 `[N,7]`。PrivateTest 只允许由锁定后的 `final_evaluate` 入口显式请求。
+输出中没有 `test_samples` 或 `test_class_counts`，E7 clean batch 为 `[N,3,224,224]`，
+logits 为 `[N,7]`。当前不要请求 PrivateTest；它只允许在六个 Stage 8 run、v2
+manifest 和最终报告计划全部锁定后由单独批准的最终批次请求。
 
 ## 7. 性能 smoke test
 
@@ -160,7 +174,7 @@ HIVE 已验证 `num_workers=0` 会让 CSV 图像预处理串行阻塞 GPU；`num
 export FER_SMOKE_OUTPUT="${FER_OUTPUT_ROOT}/clean-smoke"
 set -o pipefail
 python -m occlusion_fer.train \
-  --config configs/fer2013_resnet18_clean.yaml \
+  --config configs/experiments/fer2013_resnet18_e7_high_resolution_longer.yaml \
   --data-path "${FER_DATA_CSV}" \
   --output-dir "${FER_SMOKE_OUTPUT}" \
   --seed 42 \
@@ -177,7 +191,14 @@ python -m occlusion_fer.train \
 这必须显示 `SMOKE TEST — NOT A FORMAL EXPERIMENT`。确认 loss 有限、吞吐合理、
 产生 best/last checkpoint 和 validation artifacts。smoke 数值不能写入正式结果。
 
-## 8. E0/E1 seed 2026 筛选
+## 8. 历史 E0-E7 seed-2026 筛选记录
+
+本节及 8.1-8.4 记录配方如何收敛到 E7，仅用于 development provenance。不要
+重跑这些命令来补正式证据，也不要把其中任何 seed-2026 指标并入 Stage 8 三种子
+结果。E7 已经由当前协议锁定，下面的旧阈值、候选排序和筛选目录只表示历史
+决策过程，不能重新触发配方选择或修改当前训练设置。
+
+### 8.0 E0/E1 筛选
 
 第一轮只比较 E0 原始配方与 E1 warmup/cosine。两者都按 PublicTest
 macro-F1 保存 `best.pt`，early stopping 均关闭；不要运行 `final_evaluate`，也不要
@@ -666,9 +687,15 @@ If no candidate reaches PublicTest accuracy `0.70`, record the second round as
 unsuccessful and stop. Do not run formal seeds, access PrivateTest, modify these
 three candidates, or add a new candidate based on the results.
 
-## 9. 三种子正式 clean 训练
+## 9. Stage 8 六个正式 run（当前尚未开始）
 
-开始前再次确认 Git 干净，并记录环境。不要使用 `max-*-samples`：
+只有以下 gate 全部通过才可以从服务器启动 Stage 8：集成实现已经形成干净
+commit；HIVE/Linux 本地测试和 synthetic validation 通过；Training-only 与
+PublicTest-only source、Training mean v2 和 PublicTest manifest v2 的身份已经
+验证；运行计划和输出根目录已经锁定。若任一 gate 失败，保留证据并停止，不要
+访问 PrivateTest。
+
+开始前记录 Git、环境和 GPU；不要使用 `max-*-samples`：
 
 ```bash
 git status --short --branch
@@ -677,29 +704,41 @@ python -m pip freeze > "${FER_OUTPUT_ROOT}/environment.txt"
 nvidia-smi > "${FER_OUTPUT_ROOT}/nvidia-smi-before.txt"
 ```
 
-依次运行三个 seed，每个 run 使用新的独立目录。若目录已有正式文件，不复用该
-目录；保留失败和负面实验，另建带时间或原因后缀的新目录。
+clean 使用 `configs/experiments/fer2013_resnet18_e7_clean.yaml` 和官方 CSV。
+mixed 使用 `configs/experiments/fer2013_resnet18_e7_occlusion_mixed.yaml` 的
+服务器本地解析副本、permitted-splits JSON、Training mean v2 和 PublicTest
+manifest v2；不得把个人路径写回仓库配置。每个 seed 和策略使用新的独立目录：
 
 ```bash
 set -o pipefail
 for FER_SEED in 42 123 2026; do
-  FER_RUN_OUTPUT="${FER_OUTPUT_ROOT}/clean-seed${FER_SEED}"
+  FER_RUN_OUTPUT="${FER_OUTPUT_ROOT}/formal/clean/seed${FER_SEED}"
   python -m occlusion_fer.train \
-    --config configs/fer2013_resnet18_clean.yaml \
+    --config configs/experiments/fer2013_resnet18_e7_clean.yaml \
     --data-path "${FER_DATA_CSV}" \
     --output-dir "${FER_RUN_OUTPUT}" \
-    --seed "${FER_SEED}" \
-    --device cuda \
-    --epochs 30 \
-    --batch-size 128 \
-    --num-workers 4 \
-    --amp \
-    2>&1 | tee "${FER_OUTPUT_ROOT}/clean-seed${FER_SEED}.log" || break
+    --seed "${FER_SEED}" --device cuda --amp \
+    2>&1 | tee "${FER_OUTPUT_ROOT}/formal/clean-seed${FER_SEED}.log" || break
 done
 ```
 
-任何 seed 失败都停止循环并保留 `failure.json`、日志和已有输出，不跳过后只报告
-成功 seed。每个成功目录必须有：
+只有三个 clean run 全部成功并完成 artifact 检查后，才按同一 seed 顺序运行
+mixed。以下 `${FER_MIXED_CONFIG}` 必须是仓库模板的服务器本地解析副本：
+
+```bash
+for FER_SEED in 42 123 2026; do
+  FER_RUN_OUTPUT="${FER_OUTPUT_ROOT}/formal/mixed/seed${FER_SEED}"
+  python -m occlusion_fer.train \
+    --config "${FER_MIXED_CONFIG}" \
+    --data-path "${FER_PERMITTED_SPLITS}" \
+    --output-dir "${FER_RUN_OUTPUT}" \
+    --seed "${FER_SEED}" --device cuda --amp \
+    2>&1 | tee "${FER_OUTPUT_ROOT}/formal/mixed-seed${FER_SEED}.log" || break
+done
+```
+
+任何 seed 失败都停止后续循环并保留 `failure.json`、日志和已有输出，不跳过后只
+报告成功 seed。每个成功训练目录必须有：
 
 ```text
 resolved_config.yaml
@@ -718,42 +757,34 @@ validation/last_confusion_matrix.csv
 validation/last_predictions.csv
 ```
 
-`best.pt` 由 clean PublicTest macro-F1 严格提升决定；PrivateTest 未被训练入口
-加载。检查三个 `run_metadata.json` 的 `status` 均为 `completed`、Git commit
-相同、`git_dirty` 为 `false`、seed 分别正确。
+`best.pt` 由 clean PublicTest macro-F1 严格提升决定；masked PublicTest 指标不
+参与选择，PrivateTest 未被训练入口加载。检查六个 `run_metadata.json` 的 `status`
+均为 `completed`、Git commit 相同、`git_dirty` 为 `false`、seed 和
+`training.mode` 分别正确，并核对 clean/mixed 的锁定字段完全一致。
 
-## 10. 锁定后的 PrivateTest 最终评估
+## 10. PublicTest 十条件评估与 PrivateTest 门禁
 
-本节命令已准备好，但当前 clean 开发阶段不要立即执行。只有在以下条件全部满足
-后才执行：clean 和 mixed 的六个正式 run 均完成；模型、超参数、九个遮挡条件、
-final masks 与 checkpoint 规则全部锁定；不再根据测试结果选择 epoch、seed、
-mask 或方法；计划报告全部三个 seed 和全部十个条件。下面的命令只是最终评估
-批次中的 clean condition，后续遮挡阶段必须补齐其余九个 condition 的同批评估。
+六个 best checkpoint 必须使用同一个 v2 PublicTest manifest，逐一评估 clean
+加九个遮挡条件。每个 checkpoint/condition 保存 metrics、逐类指标、混淆矩阵、
+逐样本 predictions、paired clean-to-occluded drop 和完整 provenance。该分析不
+能回写 checkpoint 或训练配置。
 
-```bash
-for FER_SEED in 42 123 2026; do
-  FER_RUN_OUTPUT="${FER_OUTPUT_ROOT}/clean-seed${FER_SEED}"
-  python -m occlusion_fer.final_evaluate \
-    --config configs/fer2013_resnet18_clean.yaml \
-    --checkpoint "${FER_RUN_OUTPUT}/best.pt" \
-    --data-path "${FER_DATA_CSV}" \
-    --output-dir "${FER_RUN_OUTPUT}" \
-    --device cuda \
-    --batch-size 128 \
-    --num-workers 4 \
-    --amp \
-    --confirm-private-test || break
-done
-```
+当前 `occlusion_fer.occlusion_evaluate` 是 PublicTest-only API，没有 PrivateTest
+路由；不要把旧的 `final_evaluate` clean-only 命令当作 v2 最终评估。PrivateTest
+只有在六个 checkpoint SHA-256、v2 artifacts、评估代码和报告计划全部锁定后，才
+由另一个明确批准的最终批次执行一次。当前不要执行任何 PrivateTest 命令。
 
-该入口只加载 checkpoint、只构建 PrivateTest dataset、不创建 optimizer、不反向
-传播，并拒绝覆盖已有 `final_test/clean_metrics.json`。每个 run 新增：
+最终报告必须保留三个 seed、两种策略和十个条件；PrivateTest 结果不能反馈到
+checkpoint、seed、mask 或方法选择。
 
 ```text
-final_test/clean_metrics.json
-final_test/clean_per_class_metrics.csv
-final_test/clean_confusion_matrix.csv
-final_test/clean_predictions.csv
+conditions/<condition>/<condition>_metrics.json
+conditions/<condition>/<condition>_per_class_metrics.csv
+conditions/<condition>/<condition>_confusion_matrix.csv
+conditions/<condition>/<condition>_predictions.csv
+conditions/<condition>_paired_drop.csv
+conditions/<condition>_provenance.json
+evaluation_provenance.json
 ```
 
 ## 11. 指标定义与论文产物映射
@@ -770,10 +801,11 @@ final_test/clean_predictions.csv
 | Methods：训练设置 | `resolved_config.yaml` | 模型、预处理、优化器参数表 |
 | 训练过程 | `history.csv` | train loss、validation loss、accuracy、macro-F1 曲线 |
 | checkpoint 选择 | `validation/best_metrics.json` | 最佳 validation macro-F1 与对应 epoch |
-| clean 总体结果 | `final_test/clean_metrics.json` | 三 seed 的 accuracy/macro-F1 及均值、标准差 |
-| 类别差异 | `*_per_class_metrics.csv` | 每类 precision/recall/F1 表或柱状图 |
-| 错误结构 | `*_confusion_matrix.csv` | 统一色阶的混淆矩阵 |
-| 错误分析 | `*_predictions.csv` | 按 sample ID 追踪正确性、置信度和七类概率 |
+| PublicTest 十条件结果 | `conditions/<condition>/<condition>_metrics.json` | 三 seed 的 accuracy/macro-F1 及均值、标准差 |
+| clean-to-occluded drop | `conditions/<condition>_paired_drop.csv` | 同一 sample ID 的配对变化 |
+| 类别差异 | `conditions/<condition>/<condition>_per_class_metrics.csv` | 每类 precision/recall/F1 表或柱状图 |
+| 错误结构 | `conditions/<condition>/<condition>_confusion_matrix.csv` | 统一色阶的混淆矩阵 |
+| 错误分析 | `conditions/<condition>/<condition>_predictions.csv` | 按 sample ID 追踪正确性、置信度和七类概率 |
 
 图表应由 CSV/JSON 自动生成，保留脚本和输入 commit；不要把图中数值手工录入。
 所有 seed 都必须报告，不能只选择最高分。当前阶段尚未提供跨种子汇总和绘图

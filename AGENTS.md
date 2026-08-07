@@ -84,17 +84,24 @@ generalization from the first-version experiments.
 ## Model and training rules
 
 - Use the same ResNet-18 architecture for both formal training strategies.
-- Replicate grayscale inputs to three channels and resize to 112×112.
+- Replicate grayscale inputs to three channels and resize to 224×224.
 - Keep the standard ResNet-18 stem.
 - Use the same optimizer, epoch budget, batch size, base augmentation, seed set,
   and checkpoint rule for both strategies.
-- Select the best checkpoint using clean validation macro-F1.
+- Use the locked E7 recipe: mild affine Training augmentation, AdamW with
+  learning rate 0.0001 and weight decay 0.001, label smoothing 0.1, no
+  scheduler, 50 epochs, batch size 128, four workers, and CUDA AMP.
+- Select the best checkpoint using strict improvement in clean PublicTest
+  macro-F1; a tie retains the earlier checkpoint.
 - Save best and last checkpoints.
 - Do not report the small CNN as a research result.
 - Do not change formal hyperparameters after inspecting final-test results.
+- Treat E0-E7 seed-2026 runs as screening history, not formal evidence.
 
 ## Occlusion rules
 
+- Use `occlusion-v2-224`; retain `occlusion-v1`/112 only as immutable
+  development history.
 - Do not modify source images in place.
 - Apply only the approved three occlusion types and three ratios.
 - Use the training-split pixel mean as the fill value.
@@ -102,6 +109,9 @@ generalization from the first-version experiments.
 - Use explicit deterministic seeds.
 - All compared checkpoints must use the same final evaluation masks.
 - Do not use test labels or test performance to generate masks.
+- Use fixed PublicTest evaluation seed 20260804 and a validated v2 manifest.
+- Reject combined all-splits CSV inputs before opening them on
+  occlusion-enabled Stage B routes.
 
 ## Output rules
 

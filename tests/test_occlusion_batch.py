@@ -1,4 +1,5 @@
 from dataclasses import FrozenInstanceError
+import multiprocessing
 
 import pytest
 import torch
@@ -53,25 +54,33 @@ class _ArtificialImageDataset(Dataset[tuple[torch.Tensor, int]]):
 
 
 def _mask_with_workers(num_workers: int) -> dict[int, torch.Tensor]:
-    loader = DataLoader(
-        _ArtificialImageDataset(),
-        batch_size=3,
-        shuffle=False,
-        num_workers=num_workers,
-        persistent_workers=num_workers > 0,
-    )
+    loader_kwargs: dict[str, object] = {
+        "batch_size": 3,
+        "shuffle": False,
+        "num_workers": num_workers,
+        "persistent_workers": False,
+    }
+    if num_workers > 0 and "fork" in multiprocessing.get_all_start_methods():
+        loader_kwargs["multiprocessing_context"] = "fork"
+    loader = DataLoader(_ArtificialImageDataset(), **loader_kwargs)
     outputs: dict[int, torch.Tensor] = {}
-    for images, sample_ids in loader:
-        masked, _ = apply_evaluation_batch(
-            images,
-            sample_ids,
-            "random_rectangle_0.30",
-            FILL_VECTOR,
-        )
-        outputs.update(
-            (int(sample_id), masked[index].clone())
-            for index, sample_id in enumerate(sample_ids.tolist())
-        )
+    iterator = iter(loader)
+    try:
+        for images, sample_ids in iterator:
+            masked, _ = apply_evaluation_batch(
+                images,
+                sample_ids,
+                "random_rectangle_0.30",
+                FILL_VECTOR,
+            )
+            outputs.update(
+                (int(sample_id), masked[index].clone())
+                for index, sample_id in enumerate(sample_ids.tolist())
+            )
+    finally:
+        shutdown_workers = getattr(iterator, "_shutdown_workers", None)
+        if shutdown_workers is not None:
+            shutdown_workers()
     return outputs
 
 

@@ -249,6 +249,8 @@ def collect_run_metadata(
     output_directory: str | Path,
     artifact_paths: Mapping[str, str | Path],
     cuda_device_name: str | None = None,
+    run_role: str | None = None,
+    protocol_identity: Mapping[str, object] | None = None,
 ) -> dict[str, Any]:
     """Collect bounded provenance without credentials or environment dumps."""
     if status not in {"running", "completed", "failed"}:
@@ -289,6 +291,8 @@ def collect_run_metadata(
         "hostname": socket.gethostname(),
         "executable": Path(sys.executable).name,
         "artifacts": relative_artifacts,
+        "run_role": run_role,
+        "protocol_identity": dict(protocol_identity or {}),
     }
 
 

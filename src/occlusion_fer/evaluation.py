@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from contextlib import nullcontext
 from dataclasses import dataclass
 
@@ -56,9 +56,12 @@ def evaluate(
     split: str = "validation",
     condition: str = "clean",
     amp_enabled: bool = False,
+    batch_transform: Callable[[Tensor, Tensor, Tensor], tuple[Tensor, Tensor, Tensor]] | None = None,
 ) -> EvaluationResult:
     """Evaluate without updates and retain paper-ready per-sample predictions."""
     _validate_evaluation_request(split, condition, amp_enabled, device)
+    if batch_transform is not None and not callable(batch_transform):
+        raise ValueError("batch_transform must be callable")
     model.eval()
     criterion = build_evaluation_criterion()
     total_loss = 0.0
@@ -74,6 +77,13 @@ def evaluate(
             batch_size = _validate_batch(images, labels, sample_ids)
             images = images.to(device, non_blocking=non_blocking)
             labels = labels.to(device, non_blocking=non_blocking)
+            if batch_transform is not None:
+                images, labels, sample_ids = batch_transform(
+                    images,
+                    labels,
+                    sample_ids.to(device, non_blocking=non_blocking),
+                )
+                _validate_batch(images, labels, sample_ids)
 
             with _autocast_context(amp_enabled):
                 logits = model(images)

@@ -288,7 +288,6 @@ def test_train_accuracy_uses_samples_not_unweighted_batch_means() -> None:
     assert result.average_loss == pytest.approx(expected_loss)
 def test_train_one_epoch_remains_clean_without_epoch_or_occlusion_inputs() -> None:
     parameters = inspect.signature(train_one_epoch).parameters
-    source = inspect.getsource(train_module.train_one_epoch)
 
     assert tuple(parameters) == (
         "model",
@@ -298,12 +297,14 @@ def test_train_one_epoch_remains_clean_without_epoch_or_occlusion_inputs() -> No
         "criterion",
         "amp_enabled",
         "scaler",
+        "training_seed",
+        "epoch",
+        "fill_vector",
+        "clean_probability",
     )
-    assert "epoch" not in parameters
-    assert "occlusion" not in source
-    assert "mask" not in source
-    assert "manifest" not in source
-    assert "training_mean" not in source
+    assert parameters["training_seed"].default is None
+    assert parameters["epoch"].default is None
+    assert parameters["fill_vector"].default is None
 
 
 def test_train_one_epoch_optimizer_step_changes_parameters() -> None:
