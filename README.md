@@ -23,6 +23,11 @@ ResNet-18，并逐步研究合成面部遮挡对七分类性能的影响。
 遮挡生成、mixed clean/occluded training、十种最终评估条件和跨种子汇总属于
 后续批准阶段，当前尚未实现。
 
+`occlusion_fer.gradcam` 是可选的 post-hoc Grad-CAM 定性分析工具。它不参与训练、
+checkpoint 选择或定量评估；当前开发阶段不生成正式研究图，也不读取 FER2013
+PrivateTest。核心 API 接收已准备好的 `[1, 3, H, W]` tensor、显式
+`target_class` 和 target layer（ResNet-18 候选为 `model.layer4[-1]`）。
+
 ## 项目结构
 
 ```text
