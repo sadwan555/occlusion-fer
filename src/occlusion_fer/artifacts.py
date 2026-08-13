@@ -235,6 +235,38 @@ def write_evaluation_artifacts(
     }
 
 
+def write_evaluation_artifacts_to_directory(
+    directory: str | Path,
+    result: EvaluationResult,
+) -> dict[str, Path]:
+    """Write one private-final condition with exact, unprefixed filenames."""
+    target = Path(directory).expanduser()
+    if target.exists():
+        if not target.is_dir() or any(target.iterdir()):
+            raise FileExistsError(
+                f"evaluation condition directory is not empty: {target}"
+            )
+    else:
+        target.mkdir(parents=True, exist_ok=False)
+    staged = write_evaluation_artifacts(target, "evaluation", result)
+    names = {
+        "metrics": "metrics.json",
+        "per_class_metrics": "per_class_metrics.csv",
+        "confusion_matrix": "confusion_matrix.csv",
+        "predictions": "predictions.csv",
+    }
+    resolved: dict[str, Path] = {}
+    for artifact_name, source in staged.items():
+        destination = target / names[artifact_name]
+        if destination.exists():
+            raise FileExistsError(
+                f"evaluation artifact already exists: {destination}"
+            )
+        source.rename(destination)
+        resolved[artifact_name] = destination
+    return resolved
+
+
 def collect_run_metadata(
     *,
     status: str,
