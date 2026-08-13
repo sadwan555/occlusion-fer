@@ -369,3 +369,182 @@ def _require_exact_integer(
         raise TrainingMeanError(f"{field_name} must be positive")
     if nonnegative and value < 0:
         raise TrainingMeanError(f"{field_name} must be non-negative")
+
+
+V2_MEAN_SCHEMA_VERSION = 2
+V2_MEAN_ALGORITHM_VERSION = "training-mean-v2"
+
+
+@dataclass(frozen=True)
+class TrainingMeanV2Envelope:
+    """Non-self-referential provenance envelope for the v2 fill mean."""
+
+    schema_version: int
+    mean_algorithm_version: str
+    dataset_name: str
+    split: str
+    training_dataset_sha256: str
+    source_image_height: int
+    source_image_width: int
+    consumer_image_height: int
+    consumer_image_width: int
+    raw_pixel_sum: int
+    pixel_count: int
+    raw_training_mean: float
+    fill_domain: str
+    accumulator_dtype: str
+
+
+def canonical_training_mean_v2_payload(
+    envelope: TrainingMeanV2Envelope,
+) -> dict[str, object]:
+    if envelope.schema_version != V2_MEAN_SCHEMA_VERSION:
+        raise TrainingMeanError("training mean v2 schema_version must be 2")
+    return asdict(envelope)
+
+
+def canonical_training_mean_v2_bytes(
+    envelope: TrainingMeanV2Envelope,
+) -> bytes:
+    return (
+        json.dumps(
+            canonical_training_mean_v2_payload(envelope),
+            ensure_ascii=True,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        + b"\n"
+    )
+
+
+def training_mean_v2_sha256(envelope: TrainingMeanV2Envelope) -> str:
+    return hashlib.sha256(canonical_training_mean_v2_bytes(envelope)).hexdigest()
+
+
+def load_training_mean_v2(path: str | Path) -> TrainingMeanV2Envelope:
+    """Load the canonical Stage 8 v2 artifact and verify its embedded SHA."""
+    target = Path(path)
+    if not target.is_file():
+        raise FileNotFoundError(
+            f"training mean v2 artifact not found: {target}"
+        )
+    data = target.read_bytes()
+    if b"\r" in data or not data.endswith(b"\n") or data.count(b"\n") != 1:
+        raise TrainingMeanError(
+            "training mean v2 artifact must be canonical LF JSON"
+        )
+    try:
+        payload = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TrainingMeanError(
+            "training mean v2 artifact must be UTF-8 JSON"
+        ) from exc
+    if not isinstance(payload, dict) or "artifact_sha256" not in payload:
+        raise TrainingMeanError(
+            "training mean v2 artifact requires external artifact_sha256"
+        )
+    digest = payload.pop("artifact_sha256")
+    try:
+        envelope = TrainingMeanV2Envelope(**payload)
+    except (TypeError, ValueError) as exc:
+        raise TrainingMeanError(
+            "training mean v2 envelope fields are invalid"
+        ) from exc
+    expected_payload = canonical_training_mean_v2_payload(envelope)
+    expected_data = (
+        json.dumps(
+            {
+                **expected_payload,
+                "artifact_sha256": training_mean_v2_sha256(envelope),
+            },
+            ensure_ascii=True,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode("utf-8")
+    if expected_data != data:
+        raise TrainingMeanError(
+            "training mean v2 artifact bytes are not canonical"
+        )
+    if digest != training_mean_v2_sha256(envelope):
+        raise TrainingMeanError("training mean v2 artifact digest mismatch")
+    validate_training_mean_v2(
+        envelope,
+        training_dataset_sha256=envelope.training_dataset_sha256,
+    )
+    return envelope
+
+
+def validate_training_mean_v2(
+    envelope: TrainingMeanV2Envelope,
+    *,
+    training_dataset_sha256: str,
+    consumer_image_size: int = 224,
+) -> None:
+    """Validate the Stage 8 v2 Training-only mean envelope."""
+    if not isinstance(envelope, TrainingMeanV2Envelope):
+        raise TrainingMeanError("training mean v2 envelope type is invalid")
+    if envelope.schema_version != V2_MEAN_SCHEMA_VERSION:
+        raise TrainingMeanError("training mean v2 schema_version is invalid")
+    if envelope.mean_algorithm_version != V2_MEAN_ALGORITHM_VERSION:
+        raise TrainingMeanError("incompatible mean algorithm version")
+    if envelope.dataset_name != "fer2013" or envelope.split != "train":
+        raise TrainingMeanError(
+            "training mean v2 requires the Training fer2013 split"
+        )
+    if (
+        type(envelope.training_dataset_sha256) is not str
+        or _SHA256_PATTERN.fullmatch(envelope.training_dataset_sha256) is None
+    ):
+        raise TrainingMeanError(
+            "training mean v2 dataset SHA must be lowercase SHA-256"
+        )
+    if (
+        type(training_dataset_sha256) is not str
+        or _SHA256_PATTERN.fullmatch(training_dataset_sha256) is None
+    ):
+        raise TrainingMeanError(
+            "expected training dataset SHA must be lowercase SHA-256"
+        )
+    if (envelope.source_image_height, envelope.source_image_width) != (48, 48):
+        raise TrainingMeanError("training mean v2 source size must be 48x48")
+    if envelope.fill_domain != "normalized_imagenet_after_resize":
+        raise TrainingMeanError("training mean v2 fill domain is incompatible")
+    if envelope.accumulator_dtype != "uint64":
+        raise TrainingMeanError("training mean v2 accumulator must be uint64")
+    if type(envelope.raw_pixel_sum) is not int or envelope.raw_pixel_sum < 0:
+        raise TrainingMeanError(
+            "training mean v2 raw_pixel_sum must be non-negative"
+        )
+    if type(envelope.pixel_count) is not int or envelope.pixel_count <= 0:
+        raise TrainingMeanError(
+            "training mean v2 pixel_count must be positive"
+        )
+    if (
+        isinstance(envelope.raw_training_mean, bool)
+        or not isinstance(envelope.raw_training_mean, (int, float))
+        or not math.isfinite(envelope.raw_training_mean)
+        or not 0 <= envelope.raw_training_mean <= 1
+    ):
+        raise TrainingMeanError(
+            "training mean v2 raw_training_mean must be finite in [0, 1]"
+        )
+    expected_mean = envelope.raw_pixel_sum / (255.0 * envelope.pixel_count)
+    if envelope.raw_training_mean != expected_mean:
+        raise TrainingMeanError(
+            "training mean v2 raw mean is inconsistent with the pixel sum"
+        )
+    if envelope.training_dataset_sha256 != training_dataset_sha256:
+        raise TrainingMeanError(
+            "training dataset SHA does not match mean artifact"
+        )
+    if (
+        envelope.consumer_image_height != consumer_image_size
+        or envelope.consumer_image_width != consumer_image_size
+    ):
+        raise TrainingMeanError(
+            "training mean consumer image size does not match v2"
+        )

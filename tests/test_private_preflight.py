@@ -5,14 +5,64 @@ import json
 import pytest
 
 from occlusion_fer.formal_checkpoints import FORMAL_CHECKPOINTS
+from occlusion_fer.private_manifest import TRAINING_MEAN_ARTIFACT_SHA256
 from occlusion_fer.private_plan import build_final_plan
 import occlusion_fer.private_preflight as preflight_module
 from occlusion_fer.private_preflight import (
     PrivatePreflightError,
     inspect_private_source,
     preflight_checkpoints,
+    validate_training_mean_artifact,
     validate_official_private_source,
 )
+
+
+TRAINING_DATASET_SHA256 = (
+    "42eb71ae81c749a40426583445c1fda1db904fc73ec6798b07596e01ebb89a4c"
+)
+FORMAL_TRAINING_MEAN = {
+    "accumulator_dtype": "uint64",
+    "artifact_sha256": TRAINING_MEAN_ARTIFACT_SHA256,
+    "consumer_image_height": 224,
+    "consumer_image_width": 224,
+    "dataset_name": "fer2013",
+    "fill_domain": "normalized_imagenet_after_resize",
+    "mean_algorithm_version": "training-mean-v2",
+    "pixel_count": 66145536,
+    "raw_pixel_sum": 8564149588,
+    "raw_training_mean": 0.5077425080522144,
+    "schema_version": 2,
+    "source_image_height": 48,
+    "source_image_width": 48,
+    "split": "train",
+    "training_dataset_sha256": TRAINING_DATASET_SHA256,
+}
+
+
+def _canonical_json_bytes(payload) -> bytes:
+    return (
+        json.dumps(
+            payload,
+            ensure_ascii=True,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        + b"\n"
+    )
+
+
+def _envelope_sha256(payload) -> str:
+    envelope = dict(payload)
+    envelope.pop("artifact_sha256", None)
+    return hashlib.sha256(_canonical_json_bytes(envelope)).hexdigest()
+
+
+def _write_training_mean(tmp_path, payload=None, *, trailing_lf=True):
+    path = tmp_path / "training_mean_v2.json"
+    data = _canonical_json_bytes(payload or FORMAL_TRAINING_MEAN)
+    path.write_bytes(data if trailing_lf else data.removesuffix(b"\n"))
+    return path
 
 
 def _write_synthetic_csv(tmp_path):
@@ -84,3 +134,49 @@ def test_checkpoint_preflight_visits_exactly_six_frozen_entries(
     assert [model_id for _, model_id in checked] == [
         item.model_id for item in FORMAL_CHECKPOINTS
     ]
+
+
+def test_formal_training_mean_uses_envelope_sha_with_trailing_lf(tmp_path) -> None:
+    path = _write_training_mean(tmp_path)
+
+    assert _envelope_sha256(FORMAL_TRAINING_MEAN) == TRAINING_MEAN_ARTIFACT_SHA256
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == (
+        "becf171033a87fca4445b1081dcc656fbe6dba2c098c38ad1b06e4e20f279295"
+    )
+    assert hashlib.sha256(path.read_bytes()).hexdigest() != (
+        TRAINING_MEAN_ARTIFACT_SHA256
+    )
+    validate_training_mean_artifact(path)
+
+
+def test_training_mean_rejects_changed_embedded_sha(tmp_path) -> None:
+    payload = dict(FORMAL_TRAINING_MEAN)
+    payload["artifact_sha256"] = "1" + TRAINING_MEAN_ARTIFACT_SHA256[1:]
+
+    with pytest.raises(PrivatePreflightError):
+        validate_training_mean_artifact(_write_training_mean(tmp_path, payload))
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("raw_training_mean", 0.5, "mean"),
+        ("training_dataset_sha256", "0" * 64, "dataset SHA"),
+    ],
+)
+def test_training_mean_rejects_changed_frozen_envelope_field(
+    tmp_path, field, value, message
+) -> None:
+    payload = dict(FORMAL_TRAINING_MEAN)
+    payload[field] = value
+    payload["artifact_sha256"] = _envelope_sha256(payload)
+
+    with pytest.raises(PrivatePreflightError, match=message):
+        validate_training_mean_artifact(_write_training_mean(tmp_path, payload))
+
+
+def test_training_mean_requires_canonical_trailing_lf(tmp_path) -> None:
+    path = _write_training_mean(tmp_path, trailing_lf=False)
+
+    with pytest.raises(PrivatePreflightError, match="canonical LF"):
+        validate_training_mean_artifact(path)

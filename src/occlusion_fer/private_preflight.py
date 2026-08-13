@@ -20,6 +20,18 @@ from occlusion_fer.private_manifest import (
     validate_manifest_binding,
 )
 from occlusion_fer.private_plan import FinalEvaluationPlan
+from occlusion_fer.training_mean import (
+    TrainingMeanError,
+    load_training_mean_v2,
+    training_mean_v2_sha256,
+    validate_training_mean_v2,
+)
+
+
+TRAINING_DATASET_SHA256 = (
+    "42eb71ae81c749a40426583445c1fda1db904fc73ec6798b07596e01ebb89a4c"
+)
+RAW_TRAINING_MEAN = 0.5077425080522144
 
 
 class PrivatePreflightError(ValueError):
@@ -77,29 +89,23 @@ def inspect_private_source(path: str | Path) -> PrivateSourceIdentity:
     )
 
 
-def validate_training_mean_file(path: str | Path) -> None:
-    mean_path = Path(path).expanduser()
-    if not mean_path.is_file():
-        raise FileNotFoundError(
-            f"Training mean artifact not found: {mean_path}"
-        )
-    digest = hashlib.sha256(mean_path.read_bytes()).hexdigest()
-    if digest != TRAINING_MEAN_ARTIFACT_SHA256:
-        raise PrivatePreflightError("Training mean artifact SHA mismatch")
-
-
 def validate_training_mean_artifact(path: str | Path) -> None:
-    """Validate exact bytes and the locked semantic mean values."""
-    validate_training_mean_file(path)
+    """Validate the canonical Stage 8 envelope and its frozen identity."""
     try:
-        payload = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise PrivatePreflightError(
-            "Training mean artifact must be UTF-8 JSON"
-        ) from exc
-    if not isinstance(payload, dict):
-        raise PrivatePreflightError("Training mean artifact must be a mapping")
-    if payload.get("raw_training_mean") != 0.5077425080522144:
+        envelope = load_training_mean_v2(Path(path).expanduser())
+        validate_training_mean_v2(
+            envelope,
+            training_dataset_sha256=TRAINING_DATASET_SHA256,
+            consumer_image_size=224,
+        )
+        identity = training_mean_v2_sha256(envelope)
+        if identity != TRAINING_MEAN_ARTIFACT_SHA256:
+            raise PrivatePreflightError(
+                "Training mean artifact identity SHA mismatch"
+            )
+    except (OSError, TrainingMeanError) as exc:
+        raise PrivatePreflightError(str(exc)) from exc
+    if envelope.raw_training_mean != RAW_TRAINING_MEAN:
         raise PrivatePreflightError("Training mean raw value mismatch")
 
 
