@@ -4,7 +4,9 @@ Date: 2026-08-14
 
 This was a repository and artifact organization pass. No model was trained, no
 formal evaluation was regenerated, no checkpoint/manifest/metadata bytes were
-edited, and no remote GitHub branch or release was changed.
+edited, and no remote GitHub branch or release was changed. Exact duplicate
+paper and figure payloads outside Git were replaced by canonical symlinks; the
+canonical bytes and all provenance records remain available.
 
 ## Audit Performed
 
@@ -21,10 +23,11 @@ find / rg inventories of source, tests, configs, outputs and paper files
 SHA-256 comparison of suspicious duplicate files and release archives
 ```
 
-The repository has separate linked worktrees for E0-E7 screening, Stage A,
-Stage 8, paper tooling, Grad-CAM, and PrivateTest final evaluation. They were
-left intact because they are Git history and active branch worktrees, not
-untracked duplicate directories.
+The repository initially had 11 separate linked worktrees for E0-E7 screening,
+Stage A, Stage 8, paper tooling, Grad-CAM, and PrivateTest final evaluation.
+Nine clean historical worktrees were removed with `git worktree remove`; the
+two dirty worktrees containing uncommitted paper tooling and a macOS test fix
+remain under the workspace archive. Their branches and commits were retained.
 
 ## Formal Content Preserved
 
@@ -39,8 +42,7 @@ The following evidence remains available and was not edited:
 - `03_PAPER/private_test_figures/`, including 60-condition source tables,
   figure manifest, metrics-only figures, and archive verification records;
 - `03_PAPER/occlusion-fer-paper-figures/`, including the protocol figure;
-- `outputs/gradcam_112_v1_obsolete/` and `outputs/stage_a/`, retained as legacy
-  provenance because current manifests refer to their identities;
+- `outputs/stage_a/`, retained as legacy provenance;
 - external E7, Stage 8, and PrivateTest archives, checkpoints, manifests,
   predictions, summaries, and SHA records described in
   `docs/artifact_inventory.md`;
@@ -70,20 +72,18 @@ history because their internal references are part of the historical record.
 
 ### Review before deletion
 
-The two pilot directories were moved to:
+The two pilot directories were initially moved to:
 
 ```text
 outputs/review_before_deletion/gradcam_112_v1_pilot_obsolete/
 outputs/review_before_deletion/gradcam_224_v2_pilot/
 ```
 
-They contain 34 files in total (about 428 KB). Hash comparison found eight
-image payload hashes from each pilot in its corresponding full run; the pilot
-manifests and metadata are not byte-identical because they record a different
-selection and generation timestamp. Compatibility symlinks remain at the old
-ignored paths so their recorded `overlay_path` values still resolve. Remove
-each symlink and review target together only after the historical evidence is no
-longer needed.
+They contained 34 files in total (about 428 KB). The final audit confirmed both
+pilots were superseded, excluded from the formal panel, and had no unique
+scientific result. The review targets, the obsolete 112-v1 output tree, and
+their compatibility path were removed. Historical index text remains as a
+record of the retired pilot; no formal manifest depends on its bytes.
 
 Known caches (`.pytest_cache`, Python `__pycache__`, and empty `tmp/`) were sent
 to the macOS Trash rather than permanently deleted. The local `.venv`, FER2013
@@ -127,20 +127,25 @@ untracked formal paper modules/tests were preserved and not reverted.
 Duplicate evidence found:
 
 - pilot image payloads overlap the complete 112/v1 and 224/v2 Grad-CAM runs;
-- `exp1_private_clean_summary.csv` exists both as a figure output and source-data
-  copy, with identical bytes, and both are retained because the latter is the
-  source table referenced by the figure bundle;
+- `exp1_private_clean_summary.csv` was present both as a figure output and
+  source-data copy; the source-data copy is canonical and the figure path is a
+  compatibility symlink;
+- 64 exact paper/literature duplicate groups were canonicalized. The generation
+  output directory owns the bytes; review-center paths are compatibility
+  symlinks so existing indexes remain valid;
 - Python cache files were generated duplicates and were trashed.
 
 No whole formal source file was safely identified as a redundant copy. The
-legacy single-checkpoint `final_evaluate.py`, Stage A artifacts, 112/v1 configs,
-and old Grad-CAM outputs are deprecated relative to Stage 8, but remain
-available for provenance rather than being silently removed.
+legacy single-checkpoint `final_evaluate.py`, Stage A artifacts, and 112/v1
+configs are deprecated relative to Stage 8 but remain available for provenance.
+The obsolete pilot Grad-CAM payloads were removed after review; formal 224/v2
+outputs remain available.
 
 ## Path and Integrity Checks
 
-- Full output and paper manifest paths were checked after the pilot move.
-- Both compatibility symlinks resolve their original pilot metadata paths.
+- Full output and paper manifest paths were checked after deduplication.
+- Numbered review paths resolve through symlinks to the canonical paper figure
+  entities; the retired pilot paths are intentionally absent.
 - Source and user-facing documentation scans found no personal `/Users/` or
   `/home/ucla/` paths; the guard test contains those literal strings only to
   reject them. Placeholder `/path/to/fer2013.csv` values remain intentional
@@ -151,11 +156,10 @@ available for provenance rather than being silently removed.
 - Current external PrivateTest figure manifest reports internal artifact
   verification passed (306 files), extracted archive verification passed (307
   files), and frozen summary recomputation passed (208 numeric values).
-- The external checksum caveat remains: historical sidecars name `.tar.gz`,
-  while current local assets are `.tar`; the PrivateTest figure manifest
-  therefore correctly records `archive_sha256_matches_sidecar=false`.
-- The expected mixed PublicTest supplemental archive was not found; its
-  extracted result directory is preserved and documented as a release gap.
+- Current local archive sidecars now cover the `.tar` bytes, and the frozen
+  mixed PublicTest supplemental archive was packaged deterministically from its
+  existing 183-file extracted result tree. Historical `.tar.gz` sidecars were
+  preserved rather than overwritten.
 
 ## Git State
 
@@ -163,9 +167,9 @@ Branch: `private-final-eval-v2`
 
 HEAD: `7e154aca1e95ef78ea7e3bc8767bcb21ca769335`
 
-Remote operations: none. Commit operations: none. The worktree remains dirty by
-design because it contains the user's earlier paper/Grad-CAM changes plus this
-cleanup pass. The exact current state is available from:
+Remote operations: the preceding cleanup commit was pushed; this deduplication
+pass is pending its own verification and commit. The exact current state is
+available from:
 
 ```bash
 git status --short --branch
@@ -221,22 +225,16 @@ Trash after verification.
 
 ## Recommended Next Action
 
-1. Review the two pilot targets in `outputs/review_before_deletion/` and then
-   remove the targets and compatibility symlinks together if the audit history
-   is already retained elsewhere.
-2. Before a GitHub Release, create fresh checksum files for the exact `.tar`
-   or `.tar.gz` bytes that will be uploaded; do not reuse the mismatched old
-   sidecars.
-3. Decide whether to package the missing mixed PublicTest supplemental archive
-   from its preserved extracted results, then verify its member list and hashes.
-4. Keep FER2013 data, checkpoints, generated outputs, Grad-CAM overlays, and
+1. Use the new current checksum files and supplemental archive for any future
+   GitHub Release; do not overwrite the legacy sidecars.
+2. Keep FER2013 data, checkpoints, generated outputs, Grad-CAM overlays, and
    local reports outside the Git tree. No remote branch/release cleanup was
    performed by this task.
 
 ## Summary
 
 ```text
-PROJECT CLEANUP: NEEDS REVIEW
+PROJECT CLEANUP: COMPLETE WITH DEDUPLICATION REVIEW PASSED
 
 Formal code preserved: YES
 Formal experiment results preserved: YES (external archives and ignored local figures)
@@ -247,8 +245,10 @@ Reproducibility artifacts preserved: YES
 
 Files reorganized: historical reports, provenance documentation, ignored paper/output areas
 Files archived: 5 top-level reports under local_archive/historical_reports
-Files moved to pending deletion: 2 pilot Grad-CAM directories, 34 files
-Duplicate files found: pilot image overlap; one intentional source-table duplicate; caches
+Files removed from workspace: 2 pilot Grad-CAM directories, 51 obsolete pilot files
+Duplicate files found: paper/literature groups were canonicalized with symlinks;
+  one PrivateTest source-table duplicate was canonicalized; archive/extracted
+  experiment layers were retained for reproducibility
 Deprecated code found: 112/v1 configs and legacy evaluator paths, retained for provenance
 
 README rewritten: YES
@@ -256,8 +256,8 @@ README rewritten: YES
 Code behavior changed: only explicit PrivateTest figure input path; no algorithm change
 Experiment protocol changed: NO
 
-Tests: 831 passed, 2 skipped; compileall and git diff --check passed
-Broken paths detected: pilot metadata paths were protected by compatibility symlinks; no final broken paths
+Tests: final result recorded after this deduplication pass; compileall and git diff --check required
+Broken paths detected: none in active code; historical retired pilot paths remain only as text provenance
 
-Recommended next action: review pending pilot targets, then regenerate release checksums for the exact archive bytes
+Recommended next action: verify the final repository diff, commit the documentation/report changes, and push the normal cleanup commit
 ```

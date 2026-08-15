@@ -28,6 +28,7 @@ predictions, logs, generated figures, environments, credentials, or archives.
 | `occlusion-fer-clean-baseline-e7-4cb1e0f.tar` | clean E7 code snapshot | `a630b2622af06e68114ef35acaeec54314a0c00b4f1f0e63934c7cc565df343b` |
 | `experiment-2-clean-occlusion-results.tar` | clean-trained PublicTest ten-condition results | `6f8b97fdc78dfb5058d50145fba2b55989b18afcc7bb594609e58f60a95eef74` |
 | `experiment-3-mixed-training-results.tar` | three mixed runs and checkpoints | `f69012e3f2847b9327b561c2b01f79001d9b420febe53575bc3895c41215a330` |
+| `experiment-3-mixed-occlusion-evaluation-c1c9187.tar.gz` | three mixed checkpoints evaluated on the ten frozen PublicTest conditions | `b57b5bbe7eba718b456bc73754857cec8a693398164856776d34b73a7e2da46e` |
 | `stage8-protocol-artifacts.tar` | Training mean v2, PublicTest manifest v2, configs and provenance | `f0a2502a81ac0b619bda4d436d44ecee1ff34c8d0fac2ee99213f0a5f4c24a9a` |
 | `fer2013-private-test-final-v2.tar` | 60 final condition results, predictions, summaries, plan and manifest | `59495cff297f37ca4e4b0ab30f614094dcb148b60b7540359d02ca94026b8d66` |
 
@@ -50,23 +51,25 @@ The generated PrivateTest figure manifest records:
   `020b701e844e7d8af7fe7bb2133c0d3ff161acbf23deca9734700789db8165e8`.
 
 These checks cover the source result tree, internal manifest, aggregate
-recomputation, and local `.tar` contents. They do not resolve the external
-sidecar mismatch below.
+recomputation, and local `.tar` contents. The local PrivateTest archive byte
+identity is additionally recorded in
+`02_EXPERIMENTS/fer2013-private-test-final-v2.tar.sha256`.
 
 ## Known Packaging Gaps
 
-1. Existing Stage 8 `SHA256SUMS` entries name `.tar.gz` files, while the current
-   local assets are uncompressed `.tar` files. Their byte hashes are expected to
-   differ; the old sidecar must not be presented as verification of the `.tar`
-   files.
-2. The PrivateTest sidecar declares a server `.tar.gz` SHA
+1. Existing Stage 8 `SHA256SUMS` entries name former `.tar.gz` files, while the
+   original local release assets are uncompressed `.tar` files. Their byte
+   hashes are expected to differ; the old sidecar is preserved and must not be
+   presented as verification of the `.tar` files. The exact current bytes are
+   listed in `SHA256SUMS.current.txt`.
+2. The legacy PrivateTest sidecar declares a server `.tar.gz` SHA
    `4f01c7e77799e9f9d0dd745be17ccdc19fb514a8be33be9ec520e424250232be`,
-   while the current local `.tar` SHA is `59495c...`. The current figure manifest
-   therefore correctly reports `archive_sha256_matches_sidecar=false`.
-3. PublicTest mixed-checkpoint evaluation is present as an extracted result
-   directory, but the expected
-   `experiment-3-mixed-occlusion-evaluation-c1c9187` archive was not found in
-   the audited release assets.
+   while the current local `.tar` SHA is
+   `59495cff297f37ca4e4b0ab30f614094dcb148b60b7540359d02ca94026b8d66`. The
+   legacy sidecar was not overwritten; the current `.tar` has its own sidecar.
+3. The historical expected mixed PublicTest archive was absent. A new
+   deterministic `.tar.gz` was created from the unchanged 183-file extracted
+   result tree and is listed above.
 
 These are packaging/provenance issues, not evidence that the contained metrics
 were recomputed or changed. Resolve them before calling a release bundle fully
@@ -74,9 +77,9 @@ verified.
 
 ## GitHub Release Recommendation
 
-Create no remote changes automatically. After review, a release should use
-new, immutable filenames and matching checksums generated from the exact bytes
-uploaded. Recommended assets are:
+No remote Release changes were made automatically. A future release should use
+the current immutable filenames and matching checksums generated from the exact
+bytes uploaded. Recommended assets are:
 
 - E7 clean formal archive;
 - Stage 8 clean-occlusion results archive;
