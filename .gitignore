@@ -5,6 +5,10 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 
 # Python environments
 .venv/
@@ -18,9 +22,19 @@ datasets/
 
 # Training outputs
 outputs/
+results/
 runs/
 checkpoints/
 logs/
+*.log
+
+# Generated paper figures
+03_PAPER/
+
+# Local cleanup archives and deletion review
+local_archive/
+review_before_deletion/
+tmp/
 
 # Model weights
 *.pt
@@ -33,6 +47,11 @@ logs/
 *.tar
 *.tar.gz
 
+# Packaging output
+build/
+dist/
+*.egg-info/
+
 # Secrets and local configuration
 .env
 kaggle.json
@@ -40,3 +59,4 @@ kaggle.json
 # IDE settings
 .vscode/
 .idea/
+.ipynb_checkpoints/

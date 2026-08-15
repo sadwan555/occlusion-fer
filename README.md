@@ -1,203 +1,165 @@
 # Occlusion FER
 
-一个可复现的 PyTorch 科研项目：在 FER2013 上训练 ImageNet 预训练的
-ResNet-18，并逐步研究合成面部遮挡对七分类性能的影响。
+这是一个用于 FER2013 合成遮挡实验的 PyTorch 研究仓库。项目使用同一套
+ImageNet-pretrained ResNet-18，比较 clean-only 与 mixed clean/occluded training，
+并在 clean、upper-face、lower-face 和 random-rectangle 条件下评估七类
+FER2013 数据集标签。
 
-本项目预测 FER2013 提供的数据集标签。实验结果不能证明模型识别了人的真实
-内在情绪、困惑、理解程度、参与度或学习结果，也不用于宣称真实场景鲁棒性、
-跨数据集泛化或最先进性能。
+本项目只预测数据集定义的 facial-expression labels。结果不能解释为对真实内在
+情绪、困惑、理解、参与度、学习结果或其他认知状态的识别，也不支持真实场景
+鲁棒性、跨数据集泛化、算法新颖性或 state-of-the-art 声明。
 
-## 当前阶段
+## 实验设计
 
-当前代码完成了 clean baseline 的可复现训练与评估基础：
+正式第一版实验已经完成，锁定范围如下：
 
-- `Training` 用于训练；
-- `PublicTest` 用于逐 epoch 验证，并按 clean validation macro-F1 选择
-  `best.pt`；
-- `PrivateTest` 不会被训练入口加载，只能通过显式确认的最终评估入口访问；
-- 固定七类顺序：angry、disgust、fear、happy、sad、surprise、neutral；
-- 灰度图复制为三通道，缩放到 `112×112`，使用 ImageNet normalization；
-- 保存 best/last checkpoint、训练历史、逐类指标、混淆矩阵和逐样本预测；
-- 记录解析后的配置、Git 状态、软件版本、设备和失败信息。
+- 数据集：FER2013；`Training` 用于训练，`PublicTest` 用于验证与 checkpoint
+  选择，`PrivateTest` 只用于协议冻结后的最终评估；
+- 模型：标准 stem、七类输出的 ImageNet-pretrained ResNet-18；
+- 输入：48x48 灰度图复制为三通道，bilinear resize 到 224x224，再做 ImageNet
+  normalization；
+- 正式种子：42、123、2026；
+- 训练策略：clean-only 与 mixed clean/occluded；
+- 遮挡：`upper_face`、`lower_face`、`random_rectangle`，target ratio 为 0.20、
+  0.30、0.40；
+- 协议：`occlusion-v2-224`，fill value 来自 Training split pixel mean，固定 mask
+  seed 为 20260804；
+- 评估：每个 best checkpoint 使用相同的 1 个 clean 与 9 个 masked conditions；
+- 指标：accuracy、macro-F1、confusion matrix、per-class metrics、per-sample
+  predictions 和 clean-to-occluded drop；
+- checkpoint rule：每个 epoch 的 clean PublicTest macro-F1 严格提升时更新
+  `best.pt`，同时保留 `last.pt`。
 
-遮挡生成、mixed clean/occluded training、十种最终评估条件和跨种子汇总属于
-后续批准阶段，当前尚未实现。
+主要实验对应关系：
 
-`occlusion_fer.gradcam` 是可选的 post-hoc Grad-CAM 定性分析工具。它不参与训练、
-checkpoint 选择或定量评估；当前开发阶段不生成正式研究图，也不读取 FER2013
-PrivateTest。核心 API 接收已准备好的 `[1, 3, H, W]` tensor、显式
-`target_class` 和 target layer（ResNet-18 候选为 `model.layer4[-1]`）。
+1. Experiment 1：三 seed clean-only E7 baseline。
+2. Experiment 2：clean-trained checkpoints 在十个固定条件上的评估。
+3. Experiment 3：三 seed mixed training，以及 clean-only 与 mixed 的同条件比较。
+4. Final evaluation：六个冻结 best checkpoints 在 PrivateTest 的十个条件上一次性
+   评估，共 60 个 model-condition evaluations。
 
-## 项目结构
+Grad-CAM 是可选的 PublicTest 定性分析，只使用 seed-42 clean/mixed checkpoints，
+不参与训练、checkpoint 选择或定量结论。
+
+## 正式代码 lineage
+
+正式结果来自 Git 中保留的不同阶段分支。当前仓库没有一个已审核的 integration
+commit 把所有阶段合并到同一棵文件树，因此复现时必须 checkout 精确 commit，不能
+把当前分支中的 112/v1 smoke 配置当作正式配置。
+
+| 阶段 | Commit | 用途 |
+|---|---|---|
+| E7 clean formal | `4cb1e0ffe4b55efc090a45cfed560b28f50b9509` | 224x224、50 epoch clean-only 三 seed checkpoints |
+| Stage 8 | `c1c9187aa2ddf7dd84906c7f139ad9a750ef202d` | `occlusion-v2-224` artifacts、mixed training、PublicTest 十条件评估 |
+| Private final | `7e154aca1e95ef78ea7e3bc8767bcb21ca769335` | 冻结 checkpoint registry、PrivateTest manifest/plan/preflight/final evaluator |
+| Legacy baseline | `da889bdd818cab6403767f2f6c7d5391d8317324` | 112x112、30 epoch 历史实验，仅用于追溯 |
+
+`da889bd` 的 checkpoint、metrics、figures 和 v1 masks 不得混入当前论文结果。
+
+## 仓库结构
 
 ```text
-configs/                  可移植 YAML 配置（数据路径保持 placeholder）
-src/occlusion_fer/        数据、模型、训练、评估和产物代码
-tests/                    自动测试
-docs/server_runbook.md    完整 HIVE 部署、排错和实验规范
-SERVER_RUN.md             五分钟服务器快速开始
+configs/                 当前 checkout 可见的配置；112/v1 文件属于 smoke/历史阶段
+src/occlusion_fer/       数据、模型、评估、PrivateTest 和论文图表代码
+tests/                   synthetic/unit/smoke 测试
+docs/                    研究边界、运行说明、artifact inventory 与 provenance
+outputs/                 本地输出，Git ignored
+03_PAPER/                生成的论文图表，Git ignored
+local_archive/           历史报告，Git ignored
 ```
 
-数据、checkpoint、输出、日志、虚拟环境和密钥都必须留在 Git 仓库外。
+当前本地正式图表位置：
 
-## 主要入口
+- `outputs/gradcam_224_v2/`：正式 PublicTest Grad-CAM 输出；
+- `03_PAPER/private_test_figures/`：PrivateTest 最终图表与绘图源表；
+- `03_PAPER/occlusion-fer-paper-figures/`：方法图等生成图表。
 
-环境与数据预检：
+正式训练结果、checkpoints、manifests、predictions 和 release archives 不进入 Git。
+文件名、SHA-256、已知缺口以及 GitHub Release 建议见
+[`docs/artifact_inventory.md`](docs/artifact_inventory.md)。
+
+## 环境
+
+Python 依赖以 `pyproject.toml` 为准。CUDA 服务器应先按 PyTorch 官方说明安装与
+驱动匹配的 PyTorch，再安装本项目：
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e ".[test,paper]"
+python -m pip check
+```
+
+FER2013 CSV、checkpoint、manifest 和输出路径都通过 YAML 或 CLI 显式提供；不要把
+本机路径写回代码或配置。
+
+## 复现正式 Stage 8
+
+建议把复现用的独立 worktree 放在 workspace 的归档区，避免再次污染根目录：
+
+```bash
+git worktree add ../90_ARCHIVE/worktrees/occlusion-fer-e7-clean 4cb1e0ffe4b55efc090a45cfed560b28f50b9509
+git worktree add ../90_ARCHIVE/worktrees/occlusion-fer-stage8 c1c9187aa2ddf7dd84906c7f139ad9a750ef202d
+git worktree add ../90_ARCHIVE/worktrees/occlusion-fer-private-final 7e154aca1e95ef78ea7e3bc8767bcb21ca769335
+```
+
+在 E7 clean worktree 中，先 preflight，再对三个正式种子分别运行同一配置：
 
 ```bash
 python -m occlusion_fer.preflight \
-  --config configs/fer2013_resnet18_clean.yaml \
+  --config configs/experiments/fer2013_resnet18_e7_clean.yaml \
   --data-path /path/to/fer2013.csv \
   --output-dir /path/to/preflight-output \
   --device cuda
-```
 
-clean 训练：
-
-```bash
 python -m occlusion_fer.train \
-  --config configs/fer2013_resnet18_clean.yaml \
+  --config configs/experiments/fer2013_resnet18_e7_clean.yaml \
   --data-path /path/to/fer2013.csv \
-  --output-dir /path/to/run-output \
-  --seed 42 \
-  --device cuda \
-  --epochs 30 \
-  --batch-size 128 \
-  --num-workers 4 \
-  --amp
+  --output-dir /path/to/clean-seed42 \
+  --seed 42 --device cuda --epochs 50 \
+  --batch-size 128 --num-workers 4 --amp
 ```
 
-只有在模型、超参数、遮挡 masks、mixed protocol 和 checkpoint 规则全部锁定
-后，才把下面的 clean 命令作为最终评估批次的一部分运行；当前 clean 开发阶段
-不要提前查看 PrivateTest：
+在 Stage 8 worktree 中生成 Training/PublicTest v2 artifacts，再使用
+`fer2013_resnet18_e7_occlusion_mixed.yaml` 运行三个 mixed seeds，并用
+`occlusion_fer.occlusion_evaluate` 对六个 best checkpoints 运行相同十条件评估：
 
 ```bash
-python -m occlusion_fer.final_evaluate \
-  --config configs/fer2013_resnet18_clean.yaml \
-  --checkpoint /path/to/run-output/best.pt \
+python -m occlusion_fer.stage_b_artifacts \
   --data-path /path/to/fer2013.csv \
-  --output-dir /path/to/run-output \
-  --device cuda \
-  --batch-size 128 \
-  --num-workers 4 \
-  --amp \
-  --confirm-private-test
+  --output-dir /path/to/stage8-protocol-artifacts
+
+python -m occlusion_fer.occlusion_evaluate --help
 ```
 
-服务器上的完整顺序、三种子命令、输出解释和故障处理见
-[`docs/server_runbook.md`](docs/server_runbook.md)。
+不要重新生成或调整已冻结的正式结果。上述入口用于复核代码与复现流程；实际复现
+必须保留 resolved config、Git identity、artifact/checkpoint SHA 和失败记录。
 
-## 论文可用产物
+## PrivateTest 与论文图表
 
-每个正式 run 的主要文件包括：
+PrivateTest evaluator 只有在 plan、FER2013 source、Training mean、manifest 和六个
+checkpoint 全部通过身份检查，并显式提供 `--confirm-private-test` 时才会运行。已有
+最终结果不得因整理或绘图而重算。
 
-- `resolved_config.yaml`：Methods 中的模型、数据处理与训练设置；
-- `run_metadata.json`：Git、软件、设备、种子和运行状态；
-- `history.csv`：绘制 loss、accuracy、macro-F1 与训练吞吐曲线；
-- `validation/best_*`：说明 checkpoint 选择依据；
-- `final_test/clean_metrics.json`：锁定后的 clean test 总体结果；
-- `*_per_class_metrics.csv`：逐类结果表或柱状图；
-- `*_confusion_matrix.csv`：混淆矩阵图；
-- `*_predictions.csv`：配对条件比较、错误分析和可追溯样本结果。
-
-这些文件提供论文图表的原始证据；不要手工改写输出数值，也不要只报告表现
-最好的 seed。
-
-## Clean baseline 论文图表
-
-`occlusion_fer.paper_figures` 从三个正式 clean-only run 生成可追溯的
-FER2013 PublicTest/validation 图表。它不读取 checkpoint、逐样本图像或 smoke
-test，不修改输入 run，也不执行训练或 PrivateTest 评估。
-
-安装独立的论文绘图依赖；需要运行测试时再额外安装 test 依赖：
+从现有冻结结果重新生成 PrivateTest 图表时，输入与输出路径必须显式给出：
 
 ```bash
-python -m pip install -e '.[paper]'
-python -m pip install -e '.[test]'
+python -m occlusion_fer.private_paper_figures \
+  --private-root /path/to/extracted/final-private-test-v2 \
+  --output-dir /path/to/new-private-test-figures
 ```
 
-入口必须显式接收三个 run、包含官方 split 计数的 preflight 日志和一个位于正式
-run 之外的输出目录：
+该脚本只读取已完成结果并核验 provenance，不训练模型、不执行 inference，也不修改
+source results。
+
+## 测试
 
 ```bash
-python -m occlusion_fer.paper_figures \
-  --run-dir /path/to/clean-seed42 \
-  --run-dir /path/to/clean-seed123 \
-  --run-dir /path/to/clean-seed2026 \
-  --preflight-log /path/to/preflight.log \
-  --output-dir /path/to/paper-figures
+PYTHONPATH=src pytest -q
+python3 -m compileall -q src tests
+git diff --check
 ```
 
-每个 run 的直接输入是：
-
-- `run_metadata.json` 与 `resolved_config.yaml`：seed、run 状态、训练模式和实验
-  commit；
-- `history.csv`：原始 30-epoch train/validation 曲线，不进行平滑、插值或拟合；
-- `validation/best_metrics.json`：clean validation 总体指标、类别顺序和内嵌
-  confusion matrix；
-- `validation/best_per_class_metrics.csv`：七类 precision、recall、F1 和 support；
-- `validation/best_confusion_matrix.csv`：真实标签行、预测标签列的原始计数矩阵。
-
-类别分布只解析显式传入 preflight 日志的 `train_samples`、
-`validation_samples`、`train_class_counts` 和 `validation_class_counts`。脚本严格
-验证 seeds 为 `42/123/2026`、`condition=clean`、`split=validation`、固定类别
-顺序、PublicTest 3,589 个样本及所有 CSV/JSON 之间的一致性。缺失、错序、NaN、
-Inf、总数或矩阵不一致都会在创建输出前失败。
-
-跨 seed 的标准差使用 `pandas.Series.std(ddof=1)`，即 sample standard
-deviation。混淆矩阵先分别对每个 seed 按真实类别行归一化，再逐单元格求三 seed
-算术均值；不会把 10,767 次跨 seed 推断描述成相互独立的样本。类别分布柱高为
-各 split 内百分比，柱顶保留原始 count。
-
-四组图均生成 PDF、SVG 和 300-dpi PNG：
-
-```text
-clean_training_validation_curves.{pdf,svg,png}
-clean_per_class_f1.{pdf,svg,png}
-clean_validation_confusion_matrix.{pdf,svg,png}
-fer2013_training_publictest_distribution.{pdf,svg,png}
-```
-
-同时生成：
-
-```text
-summary_metrics.csv
-per_class_f1_summary.csv
-mean_normalized_confusion_matrix.csv
-class_distribution.csv
-generation_manifest.json
-```
-
-`generation_manifest.json` 记录输入路径及 SHA-256、正式实验 commit、软件版本、
-完整命令、统计规则和输出列表。重新生成后应核对 manifest 的
-`split=validation`、`class_distribution_splits=[Training, PublicTest]`、
-`condition=clean` 与 `smoke_test_read=false`。
-
-这些图只支持 clean-only PublicTest/validation baseline 分析。它们不是
-PrivateTest/final-test 结果，不包含合成遮挡或 mixed training，也不能用于回答
-RQ1–RQ3、宣称 SOTA、真实场景鲁棒性，或推断人的真实内在情绪和认知状态。
-
-## Overall experimental framework
-
-`occlusion_fer.paper_framework` 生成 Section 3.1 使用的横版整体实验框架图。该图
-采用从左到右的模块化布局，描述 FER2013 官方 split、图像预处理、两种训练策略、
-共享 backbone 架构、10 个统一评价条件和评价输出，不读取实验结果，也不包含
-结果数值。
-
-```bash
-python -m occlusion_fer.paper_framework \
-  --output-dir /path/to/paper-framework
-```
-
-输出包括一份可编辑 SVG、一份矢量 PDF 和一份 300-dpi PNG：
-
-```text
-overall_experimental_framework_landscape.svg
-overall_experimental_framework_landscape.pdf
-overall_experimental_framework_landscape.png
-```
-
-图中保留 Training、PublicTest 和 PrivateTest 的官方角色：Training 用于模型拟合，
-PublicTest 用于验证和 checkpoint selection，PrivateTest 仅用于最终评价。两种训练
-策略使用相同的 ImageNet-pretrained ResNet-18 架构，但分别训练；随后使用相同的
-1 个 clean 与 9 个 occluded conditions 评价。
+测试使用 synthetic fixtures；不会把 small CNN、smoke run 或人工数据输出当作研究
+结果。服务器运行与阶段边界见 [`docs/server_runbook.md`](docs/server_runbook.md)。

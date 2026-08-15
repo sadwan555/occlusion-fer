@@ -16,37 +16,28 @@ from occlusion_fer.paper_framework import (
 
 
 EXPECTED_VISIBLE_TEXT = (
-    "FER2013 Dataset",
-    "Official Data Splits",
+    "Overall experimental framework",
+    "Current formal paper lineage: 224 x 224",
+    "FER2013",
+    "Official labels",
+    "Official splits",
     "Training",
     "PublicTest",
-    "PrivateTest",
-    "Image Pre-processing",
-    "Grayscale image",
-    "Resize to",
-    "112\u00d7112",
-    "Replicate to",
-    "3 channels",
-    "ImageNet",
-    "normalization",
-    "Training Strategies",
-    "Clean-only Baseline",
-    "Mixed Clean/",
-    "Occluded Training",
-    "ImageNet-pretrained ResNet-18",
-    "same architecture,",
-    "trained separately",
-    "Evaluation Conditions (10 total)",
-    "Clean",
-    "Upper-face",
-    "Lower-face",
-    "Random Rectangular",
-    "20% / 30% / 40%",
-    "Evaluation Outputs",
+    "PrivateTest: reserved",
+    "Pre-processing",
+    "Resize: 224 x 224",
+    "Locked occlusion protocol",
+    "upper_face",
+    "lower_face",
+    "random_rectangle",
+    "Experiment 1 | Clean baseline",
+    "Experiment 2 | Occlusion analysis",
+    "Reuse Experiment 1 Clean-only best checkpoints",
+    "Experiment 3 | Mixed training",
+    "Clean-only vs Mixed training comparison",
+    "Grad-CAM qualitative analysis",
     "Accuracy",
     "Macro-F1",
-    "Per-class Metrics",
-    "Confusion Matrix",
 )
 
 
@@ -70,12 +61,14 @@ def test_framework_exports_editable_vectors_and_300_dpi_png(tmp_path: Path) -> N
     )
     for expected in EXPECTED_VISIBLE_TEXT:
         assert expected in visible_text
+    assert "112" not in visible_text
+    assert "PrivateTest: final" not in visible_text
     assert "<text" in svg_text
 
     with Image.open(png_path) as image:
         assert image.format == "PNG"
         assert image.width >= 3500
-        assert image.height >= 1900
+        assert image.height >= 1800
         assert image.width / image.height >= 1.7
         dpi = image.info["dpi"]
         assert dpi[0] == pytest.approx(300, abs=0.01)

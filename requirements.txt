@@ -1,0 +1,2 @@
+# Runtime dependencies and optional groups are declared in pyproject.toml.
+# Install the project with: python -m pip install -e ".[test,paper]"

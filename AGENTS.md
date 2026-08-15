@@ -84,7 +84,11 @@ generalization from the first-version experiments.
 ## Model and training rules
 
 - Use the same ResNet-18 architecture for both formal training strategies.
-- Replicate grayscale inputs to three channels and resize to 112×112.
+- The current formal paper lineage replicates grayscale inputs to three channels
+  and resizes to 224×224. It is the locked E7/Stage 8 lineage used by
+  Experiments 1-3 and `occlusion-v2-224` evaluation artifacts.
+- Treat the earlier 112×112, 30-epoch, `da889bd` lineage as legacy. Do not mix
+  its checkpoints, metrics, or figures into current formal paper results.
 - Keep the standard ResNet-18 stem.
 - Use the same optimizer, epoch budget, batch size, base augmentation, seed set,
   and checkpoint rule for both strategies.

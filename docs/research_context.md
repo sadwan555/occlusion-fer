@@ -1,156 +1,96 @@
 # Research Context
 
-## Project
+## Question
 
-This project studies occlusion-robust static facial expression recognition on
-FER2013.
+This project studies how controlled synthetic occlusion changes seven-class
+FER2013 label classification, and whether mixed clean/occluded training reduces
+the resulting performance drop relative to clean-only training.
 
-## Research scope
+The research questions are:
 
-The model predicts one of seven FER2013 dataset labels:
+- RQ1: Do upper-face, lower-face, and random-rectangle occlusions produce
+  different performance drops?
+- RQ2: How does performance change as the target occlusion ratio increases from
+  0.20 to 0.40?
+- RQ3: Does mixed training improve masked-condition performance without a clear
+  loss on the clean condition?
 
-- angry
-- disgust
-- fear
-- happy
-- sad
-- surprise
-- neutral
+## Scope
 
-These labels describe dataset-defined facial-expression categories. They must
-not be interpreted as verified internal emotion, confusion, understanding,
-engagement, or another cognitive state.
+The first version uses only FER2013 and one ImageNet-pretrained, standard-stem
+ResNet-18. The label order is:
 
-An online-classroom example may be used only as hypothetical HCI motivation. It
-is not the experimental setting and does not determine the dataset or model.
+```text
+angry, disgust, fear, happy, sad, surprise, neutral
+```
 
-## First-version objective
+These are dataset-defined facial-expression categories. They are not verified
+internal emotion, confusion, understanding, engagement, learning outcome, or
+another cognitive state. An online-classroom example is hypothetical HCI
+motivation only and is not the experimental application.
 
-The first version trains an ImageNet-pretrained ResNet-18 and measures its
-performance under:
+The evidence does not establish real-world robustness, cross-dataset
+generalization, novelty, or state-of-the-art performance.
 
-- clean images;
-- upper-face occlusion;
-- lower-face occlusion;
-- random rectangular occlusion.
+## Dataset Contract
 
-Occlusion ratios are limited to:
+Official FER2013 split meanings are preserved:
 
-- 20%;
-- 30%;
-- 40%.
+| Official split | Count | Use |
+|---|---:|---|
+| Training | 28,709 | optimization and Training-only pixel mean |
+| PublicTest | 3,589 | clean validation, checkpoint selection, fixed-mask analysis |
+| PrivateTest | 3,589 | final evaluation after protocol and checkpoints were frozen |
 
-A small CNN is used only to verify the training pipeline.
+PrivateTest was not used for tuning, checkpoint selection, or mask generation.
+Data and derived images remain outside Git, and paths are supplied through
+validated configuration or explicit CLI arguments.
 
-## Research questions
+## Formal Protocol
 
-RQ1: Do upper-face, lower-face, and random rectangular occlusions produce
-different performance drops?
+- Input: 48x48 grayscale to float, bilinear resize to 224x224, replicate to
+  three channels, ImageNet normalization.
+- Backbone: ImageNet-pretrained ResNet-18 with the standard stem and seven-class
+  output.
+- Training strategies: clean-only and mixed clean/occluded.
+- Formal seeds: 42, 123, 2026.
+- Budget: 50 epochs, batch size 128, AdamW, learning rate 0.0001, weight decay
+  0.001, label smoothing 0.1, no scheduler, no early stopping.
+- Checkpoint rule: best clean PublicTest macro-F1, plus a last checkpoint.
+- Protocol identity: `occlusion-v2-224`.
+- Occlusions: upper face, lower face, and random rectangle at target ratios
+  0.20, 0.30, and 0.40.
+- Fill: Training-split global raw-pixel mean transformed to normalized channel
+  values.
+- Evaluation mask seed: 20260804.
 
-RQ2: How does performance change when the occlusion ratio increases from 20% to
-40%?
+Mixed training deterministically leaves a sample clean with probability 0.5;
+otherwise it samples uniformly from the approved occlusion types and ratios.
+All compared checkpoints use the same evaluation masks.
 
-RQ3: Does mixed clean/occluded training improve occluded performance without
-clearly reducing clean performance?
+## Evidence Status
 
-## Dataset
+The first-version experimental batch is complete:
 
-Only FER2013 is included in the first version.
+- three clean-only formal runs;
+- three mixed formal runs;
+- clean plus nine masked PublicTest conditions for the six best checkpoints;
+- clean plus nine masked PrivateTest conditions for the same six frozen best
+  checkpoints;
+- per-seed metrics, aggregate tables, predictions, confusion matrices,
+  provenance, and PrivateTest paper figures.
 
-The official split meanings are preserved:
+Formal code identities are `4cb1e0f` for E7 clean training, `c1c9187` for Stage
+8 mixed training/PublicTest evaluation, and `7e154ac` for PrivateTest final
+evaluation. The earlier `da889bd` 112x112/30-epoch lineage is legacy and must
+not be mixed with the current evidence.
 
-- Training: model training;
-- PublicTest: validation and checkpoint selection;
-- PrivateTest: final testing only.
+## Reporting
 
-Data must remain outside Git. Paths are supplied through YAML configuration.
-Original numeric labels and mapped label names must both be retained.
+Report every formal seed, followed by the mean and sample standard deviation
+(`ddof=1`). Report accuracy, macro-F1, confusion matrices, per-class metrics,
+and paired clean-to-occluded drops. Failed, negative, and non-best-seed results
+must not be hidden.
 
-## Models
-
-Formal model:
-
-- torchvision ResNet-18;
-- ImageNet pretrained weights;
-- standard ResNet stem;
-- seven-class output layer;
-- grayscale images replicated to three channels;
-- input resized to 112×112.
-
-Sanity model:
-
-- a small CNN;
-- not included in the formal comparison.
-
-## Training strategies
-
-### Clean-only
-
-Training images receive only the shared basic augmentation.
-
-### Mixed clean/occluded
-
-For each training sample:
-
-- 50% probability of remaining clean;
-- 50% probability of receiving an occlusion.
-
-Occlusion type and ratio are sampled uniformly from the approved first-version
-conditions.
-
-Both strategies use the same model, data split, optimizer, training budget,
-random seeds, checkpoint rule, and evaluation masks.
-
-## Formal runs
-
-Formal experiments use three seeds:
-
-- 42
-- 123
-- 2026
-
-This produces six formal ResNet-18 training runs: three clean-only and three
-mixed.
-
-## Evaluation
-
-Each checkpoint is evaluated on ten conditions:
-
-- clean;
-- upper face at 20%, 30%, and 40%;
-- lower face at 20%, 30%, and 40%;
-- random rectangle at 20%, 30%, and 40%.
-
-All compared checkpoints use the same deterministic evaluation masks.
-
-Reported metrics are:
-
-- accuracy;
-- macro-F1;
-- confusion matrix;
-- clean-to-occluded accuracy drop;
-- clean-to-occluded macro-F1 drop.
-
-Results report every seed and mean plus standard deviation. No complex
-significance claim is made from three seeds.
-
-## Claim boundary
-
-The project may report controlled findings for FER2013 and the specified
-synthetic occlusion protocol.
-
-It must not claim:
-
-- recognition of true internal emotion or cognitive state;
-- validation of an online-classroom application;
-- real-world occlusion robustness;
-- cross-dataset generalization;
-- algorithmic novelty;
-- state-of-the-art performance.
-
-## Deferred work
-
-RAF-DB, AffectNet, a second backbone, landmarks, Grad-CAM masks, real-object
-occlusions, Transformers, distillation, reconstruction, complex attention,
-Hydra, advanced statistics, and release infrastructure are deferred until the
-first version is complete.
+The small CNN, smoke runs, screening experiments, synthetic fixtures, and
+legacy 112/v1 outputs are engineering or historical evidence only.
