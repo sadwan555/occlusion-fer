@@ -158,17 +158,18 @@ outputs remain available.
   files), and frozen summary recomputation passed (208 numeric values).
 - Current local archive sidecars now cover the `.tar` bytes, and the frozen
   mixed PublicTest supplemental archive was packaged deterministically from its
-  existing 183-file extracted result tree. Historical `.tar.gz` sidecars were
+  existing 183-file extracted result tree. The archive contains 190 unique
+  members: 183 files and 7 directories. Historical `.tar.gz` sidecars were
   preserved rather than overwritten.
 
 ## Git State
 
 Branch: `private-final-eval-v2`
 
-HEAD: `7e154aca1e95ef78ea7e3bc8767bcb21ca769335`
+HEAD: `7dadb09` (`chore: finalize artifact deduplication and archival cleanup`)
 
-Remote operations: the preceding cleanup commit was pushed; this deduplication
-pass is pending its own verification and commit. The exact current state is
+Remote operations: the deduplication commit was pushed to
+`origin/private-final-eval-v2` after verification. The exact current state is
 available from:
 
 ```bash
@@ -176,30 +177,10 @@ git status --short --branch
 git status --ignored --short
 ```
 
-Snapshot at report generation:
+Final snapshot at report generation:
 
 ```text
-M  .gitignore
-M  AGENTS.md                         (pre-existing user change)
-M  README.md
-M  SERVER_RUN.md
-D  configs/.gitkeep
-M  docs/paper_writing_blueprint.md
-M  docs/research_context.md
-M  docs/server_runbook.md
-M  pyproject.toml
-M  requirements.txt
-D  scripts/.gitkeep
-D  src/.gitkeep
-M  src/occlusion_fer/paper_figures.py (pre-existing user change)
-M  src/occlusion_fer/paper_framework.py (pre-existing user change)
-D  tests/.gitkeep
-M  tests/test_paper_framework.py      (pre-existing user change)
-?? PROJECT_CLEANUP_REPORT.md
-?? docs/artifact_inventory.md
-?? docs/provenance/private_final_training_mean_identity.md
-?? src/occlusion_fer/{gradcam_generate,paper_formal_completion,paper_gradcam,paper_stage8,private_paper_figures}.py
-?? tests/{test_gradcam_generate,test_paper_classwise,test_paper_formal_completion,test_paper_gradcam,test_paper_stage8,test_private_paper_figures}.py
+## private-final-eval-v2...origin/private-final-eval-v2
 ```
 
 ## Verification
@@ -211,7 +192,7 @@ PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_private_paper_figures.py
 2 passed in 0.51s
 
 PYTHONPATH=src .venv/bin/python -m pytest -q
-831 passed, 2 skipped in 36.63s
+831 passed, 2 skipped in 36.77s
 
 PYTHONPATH=src .venv/bin/python -m compileall -q src tests
 PASS
@@ -220,15 +201,14 @@ git diff --check
 PASS
 ```
 
-The compile/test commands recreate ignored caches; those caches were sent to
-Trash after verification.
+The compile/test commands recreate ignored caches; they remain Git-ignored.
 
 ## Recommended Next Action
 
 1. Use the new current checksum files and supplemental archive for any future
    GitHub Release; do not overwrite the legacy sidecars.
 2. Keep FER2013 data, checkpoints, generated outputs, Grad-CAM overlays, and
-   local reports outside the Git tree. No remote branch/release cleanup was
+   local reports outside the Git tree. No remote branch or release deletion was
    performed by this task.
 
 ## Summary
@@ -239,7 +219,7 @@ PROJECT CLEANUP: COMPLETE WITH DEDUPLICATION REVIEW PASSED
 Formal code preserved: YES
 Formal experiment results preserved: YES (external archives and ignored local figures)
 PrivateTest artifacts preserved: YES
-Grad-CAM artifacts preserved: YES (224/v2 formal; 112/v1 legacy retained)
+Grad-CAM artifacts preserved: YES (224/v2 formal; 112/v1 code/config provenance retained)
 Checkpoints preserved: YES (external archives and verified seed-42 Grad-CAM input copy)
 Reproducibility artifacts preserved: YES
 
@@ -256,8 +236,8 @@ README rewritten: YES
 Code behavior changed: only explicit PrivateTest figure input path; no algorithm change
 Experiment protocol changed: NO
 
-Tests: final result recorded after this deduplication pass; compileall and git diff --check required
+Tests: 831 passed, 2 skipped; compileall and git diff --check passed
 Broken paths detected: none in active code; historical retired pilot paths remain only as text provenance
 
-Recommended next action: verify the final repository diff, commit the documentation/report changes, and push the normal cleanup commit
+Recommended next action: use the current checksum files and supplemental archive for any future release; retain the legacy sidecars as historical records
 ```
